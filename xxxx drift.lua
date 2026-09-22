@@ -33,30 +33,24 @@ local C = {
 
 local connections, sectionRefs = {}, {}
 
--- Carro
 local currentCar = nil
 local driftState = { front = { enabled = false }, rear = { enabled = false } }
 local driftOriginals = { front = nil, rear = nil }
 local motorState = { enabled = false, maxVel = 100, maxTorque = 50000, currentDir = "Parar" }
 local steerState = { enabled = false, autoAlign = false, maxAngle = 0.4, speed = 0.5, currentSteer = 0, isA = false, isD = false }
 
--- Jogador (Fly removido)
 local playerState = { speed = 16, jump = 50 }
 
--- Camber
 local stanceActiveTab = "FRENTE"
 local FrontConfig = { PositionX = 0, PositionY = 0, PositionZ = 0, Camber = 0 }
 local RearConfig  = { PositionX = 0, PositionY = 0, PositionZ = 0, Camber = 0 }
 local originalOffsets, lastStanceCar = {}, nil
 
--- Câmera
 local camState = { spectating = false, spectateTarget = nil, spectateIndex = 1 }
 
--- Shaders
 local shaderState = { enabled = false }
 local originalLighting = {}
 
--- HUD Mobile
 local hudState = {
 	arrowsEnabled = true,
 	btnSize = 80,
@@ -65,7 +59,6 @@ local hudState = {
 local motorFrame, steerFrame
 local mobileButtons, lockButtons = {}, {}
 
--- [PAINEL] Estado da interface
 local uiState = {
 	scale = 0.75,
 	locked = false,
@@ -91,28 +84,35 @@ local function uiStroke(parent, color, thick)
 	s.Parent = parent
 end
 
+-- Arraste: retorna setLocked + beginDrag (pra usar nas setas)
 local function makeDraggable(frame, handle)
 	local dragging, dragStart, startPos, locked = false, nil, nil, false
 	handle = handle or frame
 
-	handle.InputBegan:Connect(function(input)
+	local function beginDrag(input)
 		if locked then return end
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = true
 			dragStart = input.Position
 			startPos = frame.Position
 		end
-	end)
+	end
 
-	handle.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+	local function endDrag(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = false
 		end
-	end)
+	end
+
+	handle.InputBegan:Connect(beginDrag)
+	handle.InputEnded:Connect(endDrag)
 
 	local conn = UserInputService.InputChanged:Connect(function(input)
 		if locked or not dragging then return end
-		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+		if input.UserInputType == Enum.UserInputType.MouseMovement
+			or input.UserInputType == Enum.UserInputType.Touch then
 			local d = input.Position - dragStart
 			frame.Position = UDim2.new(
 				startPos.X.Scale, startPos.X.Offset + d.X,
@@ -122,13 +122,17 @@ local function makeDraggable(frame, handle)
 	end)
 	table.insert(connections, conn)
 
+	local conn2 = UserInputService.InputEnded:Connect(endDrag)
+	table.insert(connections, conn2)
+
 	return function(state)
 		locked = state
-	end
+		if state then dragging = false end
+	end, beginDrag
 end
 
 --------------------------------------------------------------------
--- CARRO (base)
+-- CARRO
 --------------------------------------------------------------------
 local function findPlayerCar()
 	local folder = workspace:FindFirstChild("Cars")
@@ -230,18 +234,15 @@ local function aplicarMotor(direcao)
 	if not motorState.enabled then return end
 	local constraints = obterConstraints()
 	if not constraints then return end
-
 	local velocidadeAlvo = 0
 	if direcao == "Frente" then
 		velocidadeAlvo = -math.abs(motorState.maxVel)
 	elseif direcao == "Re" then
 		velocidadeAlvo = math.abs(motorState.maxVel)
 	end
-
 	if direcao ~= "Parar" and not isPlayerInCar(currentCar) then
 		velocidadeAlvo = 0
 	end
-
 	for _, motor in pairs(constraints:GetChildren()) do
 		if motor.Name == "Rodas" and (motor:IsA("CylindricalConstraint") or motor:IsA("HingeConstraint")) then
 			motor.ActuatorType = Enum.ActuatorType.Motor
@@ -550,9 +551,9 @@ titleLabel.TextSize = 14
 titleLabel.TextColor3 = C.title
 titleLabel.TextXAlignment = Enum.TextXAlignment.Left
 titleLabel.Parent = titleBar
+
 local setMenuLock = makeDraggable(menu, titleBar)
 
--- [ABAS] Barra de abas arrastável (rolagem horizontal)
 local tabBarFrame = Instance.new("Frame")
 tabBarFrame.Size = UDim2.new(1, -12, 0, 28)
 tabBarFrame.Position = UDim2.new(0, 6, 0, 40)
@@ -624,7 +625,6 @@ local function createTab(name)
 			pages[n].Visible = (n == name)
 		end
 	end)
-
 	return page
 end
 
@@ -909,7 +909,7 @@ sectionRefs.motor = { setToggle = setMotorToggle }
 sectionRefs.steer = { setToggle = setSteerToggle }
 
 --------------------------------------------------------------------
--- ABA JOGADOR (Fly removido)
+-- ABA JOGADOR
 --------------------------------------------------------------------
 local secSpeed = createSection(pagePlayer, "Speed", 1)
 local speedInput = makeInput(secSpeed, "WalkSpeed", "16", 1)
@@ -978,7 +978,6 @@ btnFrenteTab.MouseButton1Click:Connect(function()
 	btnTrasTab.TextColor3 = C.dim
 	refreshStanceBoxes()
 end)
-
 btnTrasTab.MouseButton1Click:Connect(function()
 	stanceActiveTab = "TRAS"
 	btnTrasTab.BackgroundColor3 = C.tabActive
@@ -993,7 +992,6 @@ stanceBoxes.PositionY = makeStanceRow(secStance, "Altura (Y)", "PositionY", 3, g
 stanceBoxes.PositionZ = makeStanceRow(secStance, "Frente/Trás (Z)", "PositionZ", 4, getStanceConfig, setStanceConfig)
 stanceBoxes.Camber = makeStanceRow(secStance, "Cambagem", "Camber", 5, getStanceConfig, setStanceConfig)
 refreshStanceBoxes()
-
 makeButton(secStance, "RESTAURAR ORIGINAL", 6, function()
 	resetStance()
 	refreshStanceBoxes()
@@ -1051,7 +1049,6 @@ stopBtn.MouseButton1Click:Connect(function()
 	stopSpectate()
 	specLabel.Text = "Alvo: Nenhum"
 end)
-
 makeButton(secSpec, "Espectar Eu", 3, function()
 	if startSpectate(player) then
 		specLabel.Text = "Alvo: " .. player.Name .. " (você)"
@@ -1065,7 +1062,6 @@ local secShader = createSection(pageVisual, "Shaders (Leve)", 1)
 makeToggle(secShader, "Ativar Shaders", false, 1, function(val)
 	applyShaders(val)
 end)
-
 local info = Instance.new("TextLabel")
 info.BackgroundTransparency = 1
 info.Size = UDim2.new(1, 0, 0, 36)
@@ -1081,15 +1077,12 @@ info.Parent = secShader
 -- ABA HUD
 --------------------------------------------------------------------
 local secHud = createSection(pageHud, "Setas Mobile", 1)
-
 makeToggle(secHud, "Mostrar Setas", true, 1, function(val)
 	hudState.arrowsEnabled = val
 	applyHudSettings()
 end)
-
 local sizeBox = makeInput(secHud, "Tamanho (40-140)", "80", 2)
 local transBox = makeInput(secHud, "Transparência (0-1)", "0", 3)
-
 makeButton(secHud, "Aplicar HUD", 4, function()
 	local s = parseNum(sizeBox.Text)
 	local t = parseNum(transBox.Text)
@@ -1100,23 +1093,10 @@ makeButton(secHud, "Aplicar HUD", 4, function()
 	applyHudSettings()
 end)
 
-local hudHint = Instance.new("TextLabel")
-hudHint.BackgroundTransparency = 1
-hudHint.Size = UDim2.new(1, 0, 0, 48)
-hudHint.Text = "Transparência 0 = tudo visível.\nTransparência 1 = tudo invisível (ainda clicável).\nNo mobile: ative Motor/Direção na aba Carro."
-hudHint.Font = Enum.Font.Gotham
-hudHint.TextSize = 11
-hudHint.TextColor3 = C.dim
-hudHint.TextWrapped = true
-hudHint.TextXAlignment = Enum.TextXAlignment.Left
-hudHint.LayoutOrder = 5
-hudHint.Parent = secHud
-
 --------------------------------------------------------------------
--- [PAINEL] ABA PAINEL
+-- ABA PAINEL
 --------------------------------------------------------------------
 local secUISize = createSection(pagePainel, "Tamanho da Interface", 1)
-
 local uiScaleLabel = Instance.new("TextLabel")
 uiScaleLabel.BackgroundTransparency = 1
 uiScaleLabel.Size = UDim2.new(1, 0, 0, 18)
@@ -1166,7 +1146,6 @@ local function sizeBtn(text, scale, x)
 	b.MouseButton1Click:Connect(function() setUIScale(scale, true) end)
 	return b
 end
-
 sizeBtn("P", 0.6, 0)
 sizeBtn("M", 0.75, 0.256)
 sizeBtn("G", 1.0, 0.512)
@@ -1180,7 +1159,6 @@ makeButton(secFine, "Aplicar e Centralizar", 2, function()
 end)
 
 local secActions = createSection(pagePainel, "Ações", 3)
-
 makeButton(secActions, "Centralizar na Tela", 1, function()
 	local vp = camera.ViewportSize
 	local w = menu.AbsoluteSize.X
@@ -1189,7 +1167,6 @@ makeButton(secActions, "Centralizar na Tela", 1, function()
 		Position = UDim2.new(0, (vp.X - w) / 2, 0, (vp.Y - h) / 2)
 	}):Play()
 end)
-
 makeToggle(secActions, "Travar Arraste", false, 2, function(val)
 	uiState.locked = val
 	if setMenuLock then setMenuLock(val) end
@@ -1206,7 +1183,7 @@ task.defer(function()
 end)
 
 --------------------------------------------------------------------
--- MOBILE CONTROLES
+-- MOBILE (arraste pelas setas se não travado)
 --------------------------------------------------------------------
 local isMobile = UserInputService.TouchEnabled
 
@@ -1254,26 +1231,20 @@ local function createLockBtn(parent)
 	return b
 end
 
--- [SETAS] Sistema de múltiplos toques simultâneos
--- Cada botão rastreia seu próprio input (por Object ou por Touch)
 local function bindHold(btn, onPress, onRelease)
 	local activeInputs = {}
 	local pressedCount = 0
 
 	local function doPress(input)
-		local id = input
-		if activeInputs[id] then return end
-		activeInputs[id] = true
+		if activeInputs[input] then return end
+		activeInputs[input] = true
 		pressedCount += 1
-		if pressedCount == 1 then
-			onPress()
-		end
+		if pressedCount == 1 then onPress() end
 	end
 
 	local function doRelease(input)
-		local id = input
-		if not activeInputs[id] then return end
-		activeInputs[id] = nil
+		if not activeInputs[input] then return end
+		activeInputs[input] = nil
 		pressedCount -= 1
 		if pressedCount <= 0 then
 			pressedCount = 0
@@ -1286,19 +1257,14 @@ local function bindHold(btn, onPress, onRelease)
 			doPress(input)
 		end
 	end)
-
 	btn.InputEnded:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
 			doRelease(input)
 		end
 	end)
-
-	-- Segurança: se o input terminar fora do botão
 	local conn = UserInputService.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-			if activeInputs[input] then
-				doRelease(input)
-			end
+		if (input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1) and activeInputs[input] then
+			doRelease(input)
 		end
 	end)
 	table.insert(connections, conn)
@@ -1314,7 +1280,7 @@ motorFrame.Visible = isMobile and hudState.arrowsEnabled
 motorFrame.ZIndex = 15
 motorFrame.Parent = sg
 
-local setMotorLock = makeDraggable(motorFrame)
+local setMotorLock, motorBeginDrag = makeDraggable(motorFrame)
 local motorLockBtn = createLockBtn(motorFrame)
 local motorLocked = false
 motorLockBtn.MouseButton1Click:Connect(function()
@@ -1325,6 +1291,14 @@ end)
 
 local btnRe = createMobileBtn(motorFrame, "v", false)
 local btnFrente = createMobileBtn(motorFrame, "^", true)
+
+-- Arrasta pelas setas se NÃO estiver travado
+btnFrente.InputBegan:Connect(function(input)
+	if not motorLocked then motorBeginDrag(input) end
+end)
+btnRe.InputBegan:Connect(function(input)
+	if not motorLocked then motorBeginDrag(input) end
+end)
 
 bindHold(btnFrente, function()
 	if not currentCar then currentCar = findPlayerCar() end
@@ -1364,7 +1338,7 @@ steerFrame.Visible = isMobile and hudState.arrowsEnabled
 steerFrame.ZIndex = 15
 steerFrame.Parent = sg
 
-local setSteerLock = makeDraggable(steerFrame)
+local setSteerLock, steerBeginDrag = makeDraggable(steerFrame)
 local steerLockBtn = createLockBtn(steerFrame)
 local steerLocked = false
 steerLockBtn.MouseButton1Click:Connect(function()
@@ -1375,6 +1349,13 @@ end)
 
 local btnEsq = createMobileBtn(steerFrame, "<", false)
 local btnDir = createMobileBtn(steerFrame, ">", true)
+
+btnEsq.InputBegan:Connect(function(input)
+	if not steerLocked then steerBeginDrag(input) end
+end)
+btnDir.InputBegan:Connect(function(input)
+	if not steerLocked then steerBeginDrag(input) end
+end)
 
 bindHold(btnEsq, function()
 	if not currentCar then currentCar = findPlayerCar() end
@@ -1511,7 +1492,6 @@ local conn3 = RunService.RenderStepped:Connect(function(dt)
 				end
 			end
 		end
-
 		if found and found ~= lastStanceCar then
 			lastStanceCar = found
 			table.clear(originalOffsets)
@@ -1525,12 +1505,10 @@ local conn3 = RunService.RenderStepped:Connect(function(dt)
 	end
 
 	local inCar = isPlayerInCar(currentCar)
-
 	if wasInCar and not inCar then
 		resetSteerOnExit()
 		if motorState.enabled then aplicarMotor("Parar") end
 	end
-
 	if (not wasInCar) and inCar then
 		steerState.isA = false
 		steerState.isD = false
@@ -1574,7 +1552,6 @@ local conn3 = RunService.RenderStepped:Connect(function(dt)
 				steerState.currentSteer = math.max(target, steerState.currentSteer - (steerState.speed * dt))
 			end
 		end
-
 		applySteerAngle(steerState.currentSteer)
 	elseif steerState.enabled and currentCar and not inCar then
 		if steerState.currentSteer ~= 0 then
