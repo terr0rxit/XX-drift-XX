@@ -1,5 +1,5 @@
 -- ╔══════════════════════════════════════════════════════════════╗
--- ║                    X • الانجراف  Controller                  ║
+-- ║                    Drift X  Controller                        ║
 -- ║     Carro | Jogador | Camber | Câmera | Visual | HUD | Painel║
 -- ╚══════════════════════════════════════════════════════════════╝
 local Players          = game:GetService("Players")
@@ -27,6 +27,11 @@ local C = {
 	tabActive = Color3.fromRGB(0, 160, 65),
 	tabInactive = Color3.fromRGB(28, 28, 28),
 }
+CRIADOR_CORES = {
+	Maxx54        = Color3.fromRGB(160, 60, 220),
+	Dzin          = Color3.fromRGB(80, 180, 255),
+	Antipathicox  = Color3.fromRGB(220, 50, 50),
+}
 local connections, sectionRefs = {}, {}
 local currentCar = nil
 local driftState = { front = { enabled = false }, rear = { enabled = false } }
@@ -49,12 +54,13 @@ local hudState = {
 	transparency = 0,
 }
 local motorFrame, steerFrame
+local tpMobileBtn
+local tpLockBtn
 local mobileButtons, lockButtons = {}, {}
 local uiState = {
 	scale = 0.75,
 	locked = false,
 }
--- ==================== TELEPORTE STATE ====================
 local tpState = {
 	savedCFrame = nil,
 	keybind = Enum.KeyCode.T,
@@ -64,24 +70,24 @@ local tpState = {
 	transparency = 0,
 }
 --------------------------------------------------------------------
--- Utils
+-- Utils (GLOBAIS pra liberar limite de 200 locais)
 --------------------------------------------------------------------
-local function parseNum(str)
+function parseNum(str)
 	return tonumber((tostring(str):gsub(",", ".")))
 end
-local function uiCorner(parent, r)
+function uiCorner(parent, r)
 	local c = Instance.new("UICorner")
 	c.CornerRadius = UDim.new(0, r or 6)
 	c.Parent = parent
 end
-local function uiStroke(parent, color, thick)
+function uiStroke(parent, color, thick)
 	local s = Instance.new("UIStroke")
 	s.Color = color or C.border
 	s.Thickness = thick or 1
 	s.Parent = parent
 	return s
 end
-local function makeDraggable(frame, handle)
+function makeDraggable(frame, handle)
 	local dragging, dragStart, startPos, locked = false, nil, nil, false
 	handle = handle or frame
 	local function beginDrag(input)
@@ -121,34 +127,144 @@ local function makeDraggable(frame, handle)
 	end, beginDrag
 end
 --------------------------------------------------------------------
--- CARRO
+-- POPUP DE CRÉDITOS (global)
 --------------------------------------------------------------------
-local function findPlayerCar()
-	local folder = workspace:FindFirstChild("Cars")
-	if not folder then return nil end
-	for _, car in ipairs(folder:GetChildren()) do
-		local stats = car:FindFirstChild("Stats")
-		if stats then
-			local owner = stats:FindFirstChild("Owner")
-			if owner then
-				local v = owner.Value
-				if v == player.Name or v == player or v == player.UserId
-					or tostring(v) == player.Name or tostring(v) == tostring(player.UserId) then
+function criarPopupCreditos()
+	local pg = Instance.new("ScreenGui")
+	pg.Name = "DriftX_PopupCreditos"
+	pg.ResetOnSpawn = false
+	pg.IgnoreGuiInset = true
+	pg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	pg.DisplayOrder = 999
+	pg.Parent = playerGui
+	local popup = Instance.new("Frame")
+	popup.Size = UDim2.new(0, 380, 0, 280)
+	popup.Position = UDim2.new(0.5, -190, 0.5, -140)
+	popup.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+	popup.BorderSizePixel = 0
+	popup.Parent = pg
+	uiCorner(popup, 12)
+	uiStroke(popup, Color3.fromRGB(60, 60, 60), 1.5)
+	local titulo = Instance.new("TextLabel")
+	titulo.Size = UDim2.new(1, -20, 0, 30)
+	titulo.Position = UDim2.new(0, 10, 0, 10)
+	titulo.BackgroundTransparency = 1
+	titulo.Text = "Drift X"
+	titulo.Font = Enum.Font.GothamBold
+	titulo.TextSize = 20
+	titulo.TextColor3 = Color3.fromRGB(255, 255, 255)
+	titulo.Parent = popup
+	local msg = Instance.new("TextLabel")
+	msg.Size = UDim2.new(1, -24, 0, 100)
+	msg.Position = UDim2.new(0, 12, 0, 45)
+	msg.BackgroundTransparency = 1
+	msg.Text = "Olá! Este script é baseado em outros scripts, então não é 100% de um único criador. Ele foi montado para ser uma versão mais completa e mais objetiva para os seus propósitos."
+	msg.Font = Enum.Font.Gotham
+	msg.TextSize = 12
+	msg.TextColor3 = Color3.fromRGB(210, 210, 210)
+	msg.TextWrapped = true
+	msg.TextYAlignment = Enum.TextYAlignment.Top
+	msg.TextXAlignment = Enum.TextXAlignment.Left
+	msg.Parent = popup
+	local lblCria = Instance.new("TextLabel")
+	lblCria.Size = UDim2.new(1, -24, 0, 18)
+	lblCria.Position = UDim2.new(0, 12, 0, 152)
+	lblCria.BackgroundTransparency = 1
+	lblCria.Text = "Criadores principais:"
+	lblCria.Font = Enum.Font.GothamBold
+	lblCria.TextSize = 12
+	lblCria.TextColor3 = Color3.fromRGB(180, 180, 180)
+	lblCria.TextXAlignment = Enum.TextXAlignment.Left
+	lblCria.Parent = popup
+	local nomesFrame = Instance.new("Frame")
+	nomesFrame.Size = UDim2.new(1, -24, 0, 26)
+	nomesFrame.Position = UDim2.new(0, 12, 0, 172)
+	nomesFrame.BackgroundTransparency = 1
+	nomesFrame.Parent = popup
+	local nl = Instance.new("UIListLayout")
+	nl.FillDirection = Enum.FillDirection.Horizontal
+	nl.Padding = UDim.new(0, 12)
+	nl.VerticalAlignment = Enum.VerticalAlignment.Center
+	nl.Parent = nomesFrame
+	local function addNome(nome, cor)
+		local l = Instance.new("TextLabel")
+		l.BackgroundTransparency = 1
+		l.Size = UDim2.new(0, 110, 1, 0)
+		l.Text = nome
+		l.Font = Enum.Font.GothamBold
+		l.TextSize = 14
+		l.TextColor3 = Color3.fromRGB(255, 255, 255)
+		l.Parent = nomesFrame
+		local s = Instance.new("UIStroke")
+		s.Color = cor
+		s.Thickness = 2
+		s.Parent = l
+	end
+	addNome("Maxx54", CRIADOR_CORES.Maxx54)
+	addNome("Dzin", CRIADOR_CORES.Dzin)
+	addNome("Antipathicox", CRIADOR_CORES.Antipathicox)
+	local ok = Instance.new("TextButton")
+	ok.Size = UDim2.new(0, 110, 0, 32)
+	ok.Position = UDim2.new(0.5, -55, 1, -48)
+	ok.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+	ok.Text = "Ok"
+	ok.Font = Enum.Font.GothamBold
+	ok.TextSize = 14
+	ok.TextColor3 = Color3.fromRGB(255, 255, 255)
+	ok.AutoButtonColor = false
+	ok.Parent = popup
+	uiCorner(ok, 8)
+	uiStroke(ok, Color3.fromRGB(80, 80, 80), 1)
+	ok.MouseEnter:Connect(function()
+		TweenService:Create(ok, TweenInfo.new(0.15), { BackgroundColor3 = Color3.fromRGB(55, 55, 55) }):Play()
+	end)
+	ok.MouseLeave:Connect(function()
+		TweenService:Create(ok, TweenInfo.new(0.15), { BackgroundColor3 = Color3.fromRGB(35, 35, 35) }):Play()
+	end)
+	ok.MouseButton1Click:Connect(function()
+		pg:Destroy()
+	end)
+end
+criarPopupCreditos()
+--------------------------------------------------------------------
+-- CARRO (globais)
+--------------------------------------------------------------------
+function findPlayerCar()
+	local carsFolder = workspace:FindFirstChild("Cars")
+	if not carsFolder then return nil end
+	local myName = player.Name
+	for _, car in pairs(carsFolder:GetChildren()) do
+		if car:IsA("Model") then
+			if car.Name:lower():find(myName:lower()) then
+				return car
+			end
+			local stats = car:FindFirstChild("Stats")
+			if stats then
+				local owner = stats:FindFirstChild("Owner")
+				if owner and tostring(owner.Value):lower() == myName:lower() then
 					return car
 				end
+			end
+			local owner = car:FindFirstChild("Owner") or car:FindFirstChild("Player") or car:FindFirstChild("OwnerName")
+			if owner and tostring(owner.Value):lower() == myName:lower() then
+				return car
+			end
+			local seat = car:FindFirstChildWhichIsA("VehicleSeat", true) or car:FindFirstChildWhichIsA("Seat", true)
+			if seat and seat.Occupant and seat.Occupant.Parent == player.Character then
+				return car
 			end
 		end
 	end
 	return nil
 end
-local function isPlayerInCar(car)
+function isPlayerInCar(car)
 	if not car or not player.Character then return false end
 	local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
 	if not humanoid or not humanoid.SeatPart then return false end
 	return humanoid.SeatPart:IsDescendantOf(car)
 end
 local WHEEL_PREFIXES = { front = { "FL", "FR" }, rear = { "RL", "RR" } }
-local function getWheels(car, group)
+function getWheels(car, group)
 	local result = {}
 	for _, obj in ipairs(car:GetChildren()) do
 		for _, pfx in ipairs(WHEEL_PREFIXES[group]) do
@@ -162,7 +278,7 @@ local function getWheels(car, group)
 	end
 	return result
 end
-local function readPhysics(wheel)
+function readPhysics(wheel)
 	local p = wheel.CustomPhysicalProperties
 	if typeof(p) == "PhysicalProperties" then
 		return {
@@ -175,7 +291,7 @@ local function readPhysics(wheel)
 	end
 	return { density = 0.7, friction = 0.3, elasticity = 0.5, frictionWeight = 1.0, elasticityWeight = 1.0 }
 end
-local function applyDrift(group, friction, frictionWeight)
+function applyDrift(group, friction, frictionWeight)
 	if not currentCar then return false end
 	local wheels = getWheels(currentCar, group)
 	if #wheels == 0 then return false end
@@ -190,7 +306,7 @@ local function applyDrift(group, friction, frictionWeight)
 	end
 	return true
 end
-local function revertDrift(group)
+function revertDrift(group)
 	if not currentCar or not driftOriginals[group] then return end
 	local wheels = getWheels(currentCar, group)
 	local o = driftOriginals[group]
@@ -200,7 +316,7 @@ local function revertDrift(group)
 		)
 	end
 end
-local function obterConstraints()
+function obterConstraints()
 	if not currentCar then return nil end
 	local constraints = currentCar:FindFirstChild("Constraints")
 	if not constraints then return nil end
@@ -211,7 +327,7 @@ local function obterConstraints()
 	end
 	return constraints
 end
-local function aplicarMotor(direcao)
+function aplicarMotor(direcao)
 	if not motorState.enabled then return end
 	local constraints = obterConstraints()
 	if not constraints then return end
@@ -232,7 +348,7 @@ local function aplicarMotor(direcao)
 		end
 	end
 end
-local function applySteerAngle(angle)
+function applySteerAngle(angle)
 	if not currentCar then return end
 	for _, name in ipairs({ "FR", "FL" }) do
 		local wheel = currentCar:FindFirstChild(name)
@@ -248,16 +364,16 @@ local function applySteerAngle(angle)
 		end
 	end
 end
-local function resetSteerOnExit()
+function resetSteerOnExit()
 	steerState.isA = false
 	steerState.isD = false
 	steerState.currentSteer = 0
 	applySteerAngle(0)
 end
 --------------------------------------------------------------------
--- TELEPORTE FUNÇÕES
+-- TELEPORTE (globais)
 --------------------------------------------------------------------
-local function SavePosition()
+function SavePosition()
 	local car = findPlayerCar() or currentCar
 	if car then
 		tpState.savedCFrame = car:GetPivot()
@@ -271,41 +387,41 @@ local function SavePosition()
 		end
 	end
 end
-local function TeleportToSaved()
+function TeleportToSaved()
 	if not tpState.savedCFrame then
 		warn("Nenhuma posição salva!")
 		return
 	end
-	local car = findPlayerCar() or currentCar
-	if car then
-		for _, part in pairs(car:GetDescendants()) do
-			if part:IsA("BasePart") then
-				part.AssemblyLinearVelocity = Vector3.zero
-				part.AssemblyAngularVelocity = Vector3.zero
-			end
-		end
-		local primary = car.PrimaryPart or car:FindFirstChildWhichIsA("BasePart")
-		if primary then
-			local tweenInfo = TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-			local tween = TweenService:Create(primary, tweenInfo, {CFrame = tpState.savedCFrame})
-			tween:Play()
-			tween.Completed:Wait()
-			pcall(function()
-				car:PivotTo(tpState.savedCFrame)
-			end)
-		end
-	else
+	local car = findPlayerCar()
+	if not car then
+		warn("Não encontrei seu carro em Workspace.Cars")
 		local char = player.Character
 		local hrp = char and char:FindFirstChild("HumanoidRootPart")
-		if hrp then
-			hrp.CFrame = tpState.savedCFrame
+		if hrp then hrp.CFrame = tpState.savedCFrame end
+		return
+	end
+	for _, part in pairs(car:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.AssemblyLinearVelocity = Vector3.zero
+			part.AssemblyAngularVelocity = Vector3.zero
 		end
 	end
+	local primary = car.PrimaryPart or car:FindFirstChildWhichIsA("BasePart")
+	if not primary then
+		car:PivotTo(tpState.savedCFrame)
+		return
+	end
+	car:PivotTo(tpState.savedCFrame)
+	local tweenInfo = TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local tween = TweenService:Create(primary, tweenInfo, { CFrame = tpState.savedCFrame })
+	tween:Play()
+	tween.Completed:Wait()
+	pcall(function() car:PivotTo(tpState.savedCFrame) end)
 end
 --------------------------------------------------------------------
--- HUD
+-- HUD (global)
 --------------------------------------------------------------------
-local function applyHudSettings()
+function applyHudSettings()
 	local size = math.clamp(hudState.btnSize or 80, 40, 140)
 	local gap = 12
 	local frameW = size * 2 + gap
@@ -336,17 +452,29 @@ local function applyHudSettings()
 		local stroke = lock:FindFirstChildOfClass("UIStroke")
 		if stroke then stroke.Transparency = trans end
 	end
+	if tpLockBtn then
+		tpLockBtn.TextTransparency = tpState.transparency
+		tpLockBtn.BackgroundTransparency = math.clamp(0.35 + tpState.transparency * 0.65, 0, 1)
+		local st = tpLockBtn:FindFirstChildOfClass("UIStroke")
+		if st then st.Transparency = tpState.transparency end
+	end
+	if tpMobileBtn then
+		tpMobileBtn.BackgroundTransparency = math.clamp(0.35 + tpState.transparency * 0.65, 0, 1)
+		tpMobileBtn.TextTransparency = tpState.transparency
+		local st = tpMobileBtn:FindFirstChildOfClass("UIStroke")
+		if st then st.Transparency = tpState.transparency end
+	end
 end
 --------------------------------------------------------------------
--- JOGADOR
+-- JOGADOR (globais)
 --------------------------------------------------------------------
-local function applySpeed(val)
+function applySpeed(val)
 	local char = player.Character
 	if not char then return end
 	local hum = char:FindFirstChildOfClass("Humanoid")
 	if hum then hum.WalkSpeed = val end
 end
-local function applyJump(val)
+function applyJump(val)
 	local char = player.Character
 	if not char then return end
 	local hum = char:FindFirstChildOfClass("Humanoid")
@@ -356,10 +484,10 @@ local function applyJump(val)
 	end
 end
 --------------------------------------------------------------------
--- CAMBER
+-- CAMBER (globais)
 --------------------------------------------------------------------
 local wheelNames = { "FL", "FR", "RL", "RR" }
-local function getWheelAttachments(car)
+function getWheelAttachments(car)
 	local attachments = {}
 	for _, name in ipairs(wheelNames) do
 		local wheelModel = car:FindFirstChild(name)
@@ -378,7 +506,7 @@ local function getWheelAttachments(car)
 	end
 	return attachments
 end
-local function applyStance()
+function applyStance()
 	local myCar = findPlayerCar()
 	if not myCar then return end
 	for name, att in pairs(getWheelAttachments(myCar)) do
@@ -396,7 +524,7 @@ local function applyStance()
 		end
 	end
 end
-local function resetStance()
+function resetStance()
 	FrontConfig = { PositionX = 0, PositionY = 0, PositionZ = 0, Camber = 0 }
 	RearConfig  = { PositionX = 0, PositionY = 0, PositionZ = 0, Camber = 0 }
 	local myCar = findPlayerCar()
@@ -409,9 +537,9 @@ local function resetStance()
 	end
 end
 --------------------------------------------------------------------
--- SPECTATE (método fixcam: CameraSubject + guardião por frame, sem delay)
+-- SPECTATE (globais)
 --------------------------------------------------------------------
-local function getPlayerList(includeSelf)
+function getPlayerList(includeSelf)
 	local list = {}
 	for _, p in ipairs(Players:GetPlayers()) do
 		if (includeSelf or p ~= player) and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
@@ -420,19 +548,19 @@ local function getPlayerList(includeSelf)
 	end
 	return list
 end
-local function restoreNormalCam()
+function restoreNormalCam()
 	camera.CameraType = Enum.CameraType.Custom
 	if player.Character then
 		local h = player.Character:FindFirstChildOfClass("Humanoid")
 		if h then camera.CameraSubject = h end
 	end
 end
-local function stopSpectate()
+function stopSpectate()
 	camState.spectating = false
 	camState.spectateTarget = nil
 	restoreNormalCam()
 end
-local function startSpectate(target)
+function startSpectate(target)
 	if not target or not target.Character then return false end
 	local hum = target.Character:FindFirstChildOfClass("Humanoid")
 	local root = target.Character:FindFirstChild("HumanoidRootPart")
@@ -444,7 +572,7 @@ local function startSpectate(target)
 	camera.CameraSubject = subject
 	return true
 end
-local function cycleSpectate(dir)
+function cycleSpectate(dir)
 	local list = getPlayerList(true)
 	if #list == 0 then stopSpectate() return nil end
 	camState.spectateIndex += dir
@@ -455,9 +583,9 @@ local function cycleSpectate(dir)
 	return t
 end
 --------------------------------------------------------------------
--- SHADERS
+-- SHADERS (globais)
 --------------------------------------------------------------------
-local function saveLighting()
+function saveLighting()
 	originalLighting = {
 		Brightness = Lighting.Brightness,
 		Ambient = Lighting.Ambient,
@@ -473,7 +601,7 @@ local function saveLighting()
 		EnvironmentSpecularScale = Lighting.EnvironmentSpecularScale,
 	}
 end
-local function clearShaderInstances()
+function clearShaderInstances()
 	for _, inst in ipairs(shaderInstances) do
 		pcall(function() inst:Destroy() end)
 	end
@@ -483,7 +611,7 @@ local function clearShaderInstances()
 	local oldAtmo = Lighting:FindFirstChild("CDT_Atmosphere")
 	if oldAtmo then oldAtmo:Destroy() end
 end
-local function createEffects()
+function createEffects()
 	clearShaderInstances()
 	local function add(cls, props)
 		local inst = Instance.new(cls)
@@ -534,7 +662,7 @@ local function createEffects()
 		atmo.Parent = Lighting
 	end
 end
-local function applyShaders(state)
+function applyShaders(state)
 	shaderState.enabled = state
 	if state then
 		if not next(originalLighting) then saveLighting() end
@@ -578,8 +706,7 @@ local function applyShaders(state)
 			Lighting.EnvironmentSpecularScale = o.EnvironmentSpecularScale
 		end)
 	end
-end
---------------------------------------------------------------------
+end--------------------------------------------------------------------
 -- GUI
 --------------------------------------------------------------------
 local old = playerGui:FindFirstChild("CDTController")
@@ -601,7 +728,7 @@ local toggleBtn = Instance.new("TextButton")
 toggleBtn.Size = UDim2.new(0, 110, 0, 28)
 toggleBtn.Position = UDim2.new(0, 14, 0.5, -14)
 toggleBtn.BackgroundColor3 = C.bg
-toggleBtn.Text = "X • الانجراف"
+toggleBtn.Text = "Drift X"
 toggleBtn.Font = Enum.Font.GothamBold
 toggleBtn.TextSize = 12
 toggleBtn.TextColor3 = C.text
@@ -636,7 +763,7 @@ local titleLabel = Instance.new("TextLabel")
 titleLabel.BackgroundTransparency = 1
 titleLabel.Size = UDim2.new(1, -40, 1, 0)
 titleLabel.Position = UDim2.new(0, 12, 0, 0)
-titleLabel.Text = "X • الانجراف"
+titleLabel.Text = "Drift X"
 titleLabel.Font = Enum.Font.GothamBold
 titleLabel.TextSize = 14
 titleLabel.TextColor3 = C.title
@@ -664,7 +791,7 @@ tabLayout.FillDirection = Enum.FillDirection.Horizontal
 tabLayout.Padding = UDim.new(0, 4)
 tabLayout.Parent = tabScroll
 local tabs, pages = {}, {}
-local function createTab(name)
+function createTab(name)
 	local btn = Instance.new("TextButton")
 	btn.Size = UDim2.new(0, 60, 0, 26)
 	btn.BackgroundColor3 = C.tabInactive
@@ -707,7 +834,7 @@ local function createTab(name)
 	end)
 	return page
 end
--- ORDEM: Carro, Teleporte(2º), ..., Painel(último)
+-- ORDEM: Carro, Teleporte(2º), ..., Créditos(último)
 local pageCarro     = createTab("Carro")
 local pageTeleporte = createTab("Teleporte")
 local pagePlayer    = createTab("Jogador")
@@ -716,10 +843,11 @@ local pageCamera    = createTab("Câmera")
 local pageVisual    = createTab("Visual")
 local pageHud       = createTab("HUD")
 local pagePainel    = createTab("Painel")
+local pageCreditos  = createTab("Créditos")
 tabs["Carro"].BackgroundColor3 = C.tabActive
 tabs["Carro"].TextColor3 = C.text
 pages["Carro"].Visible = true
-local function createSection(parent, title, order)
+function createSection(parent, title, order)
 	local sec = Instance.new("Frame")
 	sec.BackgroundColor3 = C.panel
 	sec.AutomaticSize = Enum.AutomaticSize.Y
@@ -751,7 +879,7 @@ local function createSection(parent, title, order)
 	return sec
 end
 local themedToggles, themedButtons = {}, {}
-local function makeToggle(parent, label, default, order, callback)
+function makeToggle(parent, label, default, order, callback)
 	local row = Instance.new("Frame")
 	row.Size = UDim2.new(1, 0, 0, 24)
 	row.BackgroundTransparency = 1
@@ -794,7 +922,7 @@ local function makeToggle(parent, label, default, order, callback)
 		btn.BackgroundColor3 = val and C.on or C.off
 	end
 end
-local function makeInput(parent, label, default, order)
+function makeInput(parent, label, default, order)
 	local row = Instance.new("Frame")
 	row.Size = UDim2.new(1, 0, 0, 24)
 	row.BackgroundTransparency = 1
@@ -823,7 +951,7 @@ local function makeInput(parent, label, default, order)
 	uiStroke(box, C.border, 1)
 	return box
 end
-local function makeButton(parent, text, order, callback)
+function makeButton(parent, text, order, callback)
 	local btn = Instance.new("TextButton")
 	btn.Size = UDim2.new(1, 0, 0, 28)
 	btn.BackgroundColor3 = C.apply
@@ -969,6 +1097,12 @@ makeButton(secMobileTP, "Aplicar Botão Mobile", 4, function()
 		local stroke = tpMobileBtn:FindFirstChildOfClass("UIStroke")
 		if stroke then stroke.Transparency = tpState.transparency end
 	end
+	if tpLockBtn then
+		tpLockBtn.TextTransparency = tpState.transparency
+		tpLockBtn.BackgroundTransparency = math.clamp(0.35 + tpState.transparency * 0.65, 0, 1)
+		local st = tpLockBtn:FindFirstChildOfClass("UIStroke")
+		if st then st.Transparency = tpState.transparency end
+	end
 end)
 --------------------------------------------------------------------
 -- ABA JOGADOR
@@ -1014,13 +1148,13 @@ btnTrasTab.TextColor3 = C.dim
 btnTrasTab.Parent = stanceTabRow
 uiCorner(btnTrasTab, 6)
 local stanceBoxes = {}
-local function getStanceConfig(key)
+function getStanceConfig(key)
 	return (stanceActiveTab == "TRAS" and RearConfig or FrontConfig)[key]
 end
-local function setStanceConfig(key, val)
+function setStanceConfig(key, val)
 	if stanceActiveTab == "TRAS" then RearConfig[key] = val else FrontConfig[key] = val end
 end
-local function refreshStanceBoxes()
+function refreshStanceBoxes()
 	for key, box in pairs(stanceBoxes) do
 		box.Text = string.format("%.2f", getStanceConfig(key))
 	end
@@ -1041,7 +1175,7 @@ btnTrasTab.MouseButton1Click:Connect(function()
 	btnFrenteTab.TextColor3 = C.dim
 	refreshStanceBoxes()
 end)
-local function makeStanceRow(parent, label, configKey, order)
+function makeStanceRow(parent, label, configKey, order)
 	local row = Instance.new("Frame")
 	row.Size = UDim2.new(1, 0, 0, 26)
 	row.BackgroundTransparency = 1
@@ -1110,8 +1244,7 @@ refreshStanceBoxes()
 makeButton(secStance, "RESTAURAR ORIGINAL", 6, function()
 	resetStance()
 	refreshStanceBoxes()
-end)
---------------------------------------------------------------------
+end)--------------------------------------------------------------------
 -- ABA CÂMERA
 --------------------------------------------------------------------
 local secSpec = createSection(pageCamera, "Spectate", 1)
@@ -1130,7 +1263,7 @@ row.Size = UDim2.new(1, 0, 0, 28)
 row.BackgroundTransparency = 1
 row.LayoutOrder = 2
 row.Parent = secSpec
-local function miniBtn(parent, text, x, color)
+function miniBtn(parent, text, x, color)
 	local b = Instance.new("TextButton")
 	b.Size = UDim2.new(0.3, -4, 1, 0)
 	b.Position = UDim2.new(x, 0, 0, 0)
@@ -1164,7 +1297,6 @@ makeButton(secSpec, "Espectar Eu", 3, function()
 		specLabel.Text = "Alvo: " .. player.Name .. " (você)"
 	end
 end)
--- Destravar Câmera (fixcam)
 makeToggle(secSpec, "Destravar Câmera", false, 4, function(val)
 	fixCamEnabled = val
 	if val and camState.spectating then
@@ -1262,7 +1394,7 @@ makeButton(secHud, "Aplicar HUD", 4, function()
 	applyHudSettings()
 end)
 --------------------------------------------------------------------
--- ABA PAINEL (última)
+-- ABA PAINEL
 --------------------------------------------------------------------
 local secUISize = createSection(pagePainel, "Tamanho da Interface", 1)
 local uiScaleLabel = Instance.new("TextLabel")
@@ -1275,7 +1407,7 @@ uiScaleLabel.TextColor3 = C.dim
 uiScaleLabel.TextXAlignment = Enum.TextXAlignment.Left
 uiScaleLabel.LayoutOrder = 1
 uiScaleLabel.Parent = secUISize
-local function setUIScale(newScale, center)
+function setUIScale(newScale, center)
 	newScale = math.clamp(newScale, 0.4, 1.5)
 	uiState.scale = newScale
 	TweenService:Create(uiScale, TweenInfo.new(0.18), { Scale = newScale }):Play()
@@ -1297,7 +1429,7 @@ sizeRow.Size = UDim2.new(1, 0, 0, 26)
 sizeRow.BackgroundTransparency = 1
 sizeRow.LayoutOrder = 2
 sizeRow.Parent = secUISize
-local function sizeBtn(text, scale, x)
+function sizeBtn(text, scale, x)
 	local b = Instance.new("TextButton")
 	b.Size = UDim2.new(0.23, 0, 1, 0)
 	b.Position = UDim2.new(x, 0, 0, 0)
@@ -1335,7 +1467,6 @@ makeToggle(secActions, "Travar Arraste", false, 2, function(val)
 	uiState.locked = val
 	if setMenuLock then setMenuLock(val) end
 end)
--- Tema / Cor do Painel
 local THEMES = {
 	{ name = "Preto",       accent = Color3.fromRGB(30, 30, 30) },
 	{ name = "Azul Escuro", accent = Color3.fromRGB(0, 60, 160) },
@@ -1349,7 +1480,7 @@ local THEMES = {
 	{ name = "Branco",      accent = Color3.fromRGB(200, 200, 200) },
 }
 local themeSwatches = {}
-local function applyTheme(theme)
+function applyTheme(theme)
 	C.tabActive = theme.accent
 	C.on = theme.accent
 	C.apply = Color3.new(theme.accent.R * 0.35, theme.accent.G * 0.35, theme.accent.B * 0.35)
@@ -1414,6 +1545,47 @@ for i, theme in ipairs(THEMES) do
 		applyTheme(theme)
 	end)
 end
+--------------------------------------------------------------------
+-- ABA CRÉDITOS
+--------------------------------------------------------------------
+local secCreditosInfo = createSection(pageCreditos, "Sobre", 1)
+local credDesc = Instance.new("TextLabel")
+credDesc.BackgroundTransparency = 1
+credDesc.Size = UDim2.new(1, 0, 0, 70)
+credDesc.Text = "Este script é baseado em outros scripts, então não é 100% de um único criador. Ele foi montado para ser uma versão mais completa e mais objetiva para os seus propósitos."
+credDesc.Font = Enum.Font.Gotham
+credDesc.TextSize = 11
+credDesc.TextColor3 = C.dim
+credDesc.TextWrapped = true
+credDesc.TextYAlignment = Enum.TextYAlignment.Top
+credDesc.TextXAlignment = Enum.TextXAlignment.Left
+credDesc.LayoutOrder = 1
+credDesc.Parent = secCreditosInfo
+local secCreditosLista = createSection(pageCreditos, "Criadores Principais", 2)
+function makeCreditoRow(parent, handle, cor, order)
+	local r = Instance.new("Frame")
+	r.Size = UDim2.new(1, 0, 0, 30)
+	r.BackgroundTransparency = 1
+	r.LayoutOrder = order
+	r.Parent = parent
+	local l = Instance.new("TextLabel")
+	l.BackgroundTransparency = 1
+	l.Size = UDim2.new(1, 0, 1, 0)
+	l.Text = "@" .. handle
+	l.Font = Enum.Font.GothamBold
+	l.TextSize = 16
+	l.TextColor3 = Color3.fromRGB(255, 255, 255)
+	l.TextXAlignment = Enum.TextXAlignment.Left
+	l.Parent = r
+	local s = Instance.new("UIStroke")
+	s.Color = cor
+	s.Thickness = 2
+	s.Parent = l
+	return r
+end
+makeCreditoRow(secCreditosLista, "Maxx54", CRIADOR_CORES.Maxx54, 1)
+makeCreditoRow(secCreditosLista, "Dzin", CRIADOR_CORES.Dzin, 2)
+makeCreditoRow(secCreditosLista, "Antipathicox", CRIADOR_CORES.Antipathicox, 3)
 task.defer(function()
 	task.wait(0.15)
 	local vp = camera.ViewportSize
@@ -1422,12 +1594,11 @@ task.defer(function()
 	if w > 0 and h > 0 then
 		menu.Position = UDim2.new(0, (vp.X - w) / 2, 0, (vp.Y - h) / 2)
 	end
-end)
---------------------------------------------------------------------
+end)--------------------------------------------------------------------
 -- MOBILE
 --------------------------------------------------------------------
 local isMobile = UserInputService.TouchEnabled
-local function createMobileBtn(parent, text, right)
+function createMobileBtn(parent, text, right)
 	local btn = Instance.new("TextButton")
 	btn.Name = "Arrow_" .. text
 	btn.Size = UDim2.new(0, hudState.btnSize, 0, hudState.btnSize)
@@ -1450,13 +1621,13 @@ local function createMobileBtn(parent, text, right)
 	table.insert(mobileButtons, { btn = btn, right = right })
 	return btn
 end
-local function createLockBtn(parent)
+function createLockBtn(parent)
 	local b = Instance.new("TextButton")
 	b.Size = UDim2.new(0, 22, 0, 22)
 	b.Position = UDim2.new(1, -11, 0, -11)
 	b.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-	b.BackgroundTransparency = 0.35
-	b.Text = "L"
+	b.BackgroundTransparency = 0.35 + hudState.transparency * 0.65
+	b.Text = "🔓"
 	b.Font = Enum.Font.GothamBold
 	b.TextSize = 12
 	b.TextColor3 = C.text
@@ -1469,7 +1640,7 @@ local function createLockBtn(parent)
 	table.insert(lockButtons, b)
 	return b
 end
-local function bindHold(btn, onPress, onRelease)
+function bindHold(btn, onPress, onRelease)
 	local activeInputs = {}
 	local pressedCount = 0
 	local function doPress(input)
@@ -1518,7 +1689,7 @@ local motorLocked = false
 motorLockBtn.MouseButton1Click:Connect(function()
 	motorLocked = not motorLocked
 	setMotorLock(motorLocked)
-	motorLockBtn.Text = motorLocked and "X" or "L"
+	motorLockBtn.Text = motorLocked and "🔒" or "🔓"
 end)
 local btnRe = createMobileBtn(motorFrame, "v", false)
 local btnFrente = createMobileBtn(motorFrame, "^", true)
@@ -1568,7 +1739,7 @@ local steerLocked = false
 steerLockBtn.MouseButton1Click:Connect(function()
 	steerLocked = not steerLocked
 	setSteerLock(steerLocked)
-	steerLockBtn.Text = steerLocked and "X" or "L"
+	steerLockBtn.Text = steerLocked and "🔒" or "🔓"
 end)
 local btnEsq = createMobileBtn(steerFrame, "<", false)
 local btnDir = createMobileBtn(steerFrame, ">", true)
@@ -1600,12 +1771,11 @@ bindHold(btnDir, function()
 end, function()
 	steerState.isD = false
 end)
--- Botão Mobile Teleporte
-local tpMobileBtn = Instance.new("TextButton")
+tpMobileBtn = Instance.new("TextButton")
 tpMobileBtn.Name = "TPMobileBtn"
 tpMobileBtn.Size = UDim2.new(0, tpState.btnSize, 0, tpState.btnSize)
 tpMobileBtn.Position = UDim2.new(1, -80, 0.5, -30)
-tpMobileBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 255)
+tpMobileBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
 tpMobileBtn.BackgroundTransparency = 0.35
 tpMobileBtn.Text = "TP"
 tpMobileBtn.Font = Enum.Font.GothamBold
@@ -1616,19 +1786,20 @@ tpMobileBtn.Visible = false
 tpMobileBtn.ZIndex = 20
 tpMobileBtn.Parent = sg
 uiCorner(tpMobileBtn, 12)
-local tpStroke = uiStroke(tpMobileBtn, Color3.fromRGB(255, 255, 255), 1.5)
+local tpStroke = uiStroke(tpMobileBtn, Color3.fromRGB(90, 90, 90), 1.5)
 tpMobileBtn.MouseButton1Click:Connect(TeleportToSaved)
 local setTPLock, tpBeginDrag = makeDraggable(tpMobileBtn)
 local tpLocked = false
-local tpLockBtn = Instance.new("TextButton")
+tpLockBtn = Instance.new("TextButton")
 tpLockBtn.Size = UDim2.new(0, 22, 0, 22)
 tpLockBtn.Position = UDim2.new(1, -11, 0, -11)
 tpLockBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-tpLockBtn.BackgroundTransparency = 0.35
-tpLockBtn.Text = "L"
+tpLockBtn.BackgroundTransparency = 0.35 + tpState.transparency * 0.65
+tpLockBtn.Text = "🔓"
 tpLockBtn.Font = Enum.Font.GothamBold
 tpLockBtn.TextSize = 12
 tpLockBtn.TextColor3 = C.text
+tpLockBtn.TextTransparency = tpState.transparency
 tpLockBtn.ZIndex = 25
 tpLockBtn.Parent = tpMobileBtn
 uiCorner(tpLockBtn, 6)
@@ -1636,14 +1807,14 @@ uiStroke(tpLockBtn, Color3.fromRGB(90, 90, 90), 1)
 tpLockBtn.MouseButton1Click:Connect(function()
 	tpLocked = not tpLocked
 	setTPLock(tpLocked)
-	tpLockBtn.Text = tpLocked and "X" or "L"
+	tpLockBtn.Text = tpLocked and "🔒" or "🔓"
 end)
 applyHudSettings()
 --------------------------------------------------------------------
 -- Abrir / Fechar
 --------------------------------------------------------------------
 local menuOpen, animating = false, false
-local function openMenu()
+function openMenu()
 	if animating then return end
 	animating = true
 	menu.Visible = true
@@ -1655,7 +1826,7 @@ local function openMenu()
 	t2:Play()
 	t1.Completed:Connect(function() animating = false end)
 end
-local function closeMenu()
+function closeMenu()
 	if animating then return end
 	animating = true
 	local t1 = TweenService:Create(uiScale, TweenInfo.new(0.18), { Scale = uiState.scale * 0.85 })
@@ -1675,7 +1846,7 @@ toggleBtn.MouseButton1Click:Connect(function()
 		toggleBtn.Text = "✕"
 		openMenu()
 	else
-		toggleBtn.Text = "X • الانجراف"
+		toggleBtn.Text = "Drift X"
 		closeMenu()
 	end
 end)
@@ -1724,7 +1895,6 @@ table.insert(connections, conn2)
 --------------------------------------------------------------------
 local updateTick, wasInCar = 0, false
 local conn3 = RunService.RenderStepped:Connect(function(dt)
-	-- SPECTATE: re-fixar alvo todo frame (sem delay, estilo fixcam)
 	if camState.spectating and camState.spectateTarget then
 		local char = camState.spectateTarget.Character
 		if char then
@@ -1743,7 +1913,6 @@ local conn3 = RunService.RenderStepped:Connect(function(dt)
 			stopSpectate()
 		end
 	end
-	-- FIXCAM: destrava e mantém a câmera no próprio personagem
 	if fixCamEnabled and not camState.spectating then
 		if camera.CameraType ~= Enum.CameraType.Custom then
 			camera.CameraType = Enum.CameraType.Custom
