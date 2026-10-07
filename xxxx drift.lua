@@ -1,4 +1,4 @@
--- Drift X v3.6
+-- Drift X v4.0
 local Players          = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local TweenService     = game:GetService("TweenService")
@@ -42,7 +42,6 @@ local customCarName = ""
 
 local liveCounters = {}
 local detailLabel
-local configPreview
 local selectedRemoteConfig
 local selectedConfigEntry
 
@@ -325,7 +324,8 @@ function fetchLiveConfigs()
 	return data, nil
 end
 
-function scanAllUsers()
+-- ABA JOGADORES: SÓ ONLINE AGORA (temporário)
+function scanOnlineUsers()
 	local list = {}
 	local lives, err = fetchLiveConfigs()
 	local now = os.time()
@@ -334,55 +334,72 @@ function scanAllUsers()
 		if type(live) == "table" and live.userId then
 			local ts = tonumber(live.timestamp) or 0
 			local age = now - ts
-			local isFixed = live.isFixed == true
-			local expiresAt = tonumber(live.expiresAt) or 0
-			local remaining = expiresAt > 0 and (expiresAt - now) or 0
-			local showFixed = isFixed and remaining > 0
-			local showOnline = age <= ONLINE_TIMEOUT
-			if showFixed or showOnline then
-				local uid = live.userId
+			if age <= ONLINE_TIMEOUT then
 				local cfg = live.config
 				if type(cfg) ~= "table" then cfg = {} end
-				local isSelf = (tonumber(uid) == player.UserId) or (tostring(uid) == tostring(player.UserId))
+				local isSelf = (tonumber(live.userId) == tonumber(player.UserId))
 				table.insert(list, {
 					playerName = tostring(live.name or "?"),
 					displayName = tostring(live.displayName or live.name or "?"),
-					userId = uid,
-					carName = tostring(live.carName or cfg.carDisplayName or "—"),
-					description = tostring(live.description or ""),
+					userId = live.userId,
+					carName = tostring(live.carName or "—"),
 					config = cfg,
 					timestamp = ts,
 					age = age,
-					isOnline = age <= ONLINE_TIMEOUT,
-					isFixed = isFixed,
-					expiresAt = expiresAt,
-					remaining = remaining,
 					isSelf = isSelf,
-					sameServer = (live.jobId == game.JobId),
+					sameServer = (tostring(live.jobId) == tostring(game.JobId)),
 				})
 			end
 		end
 	end
 	table.sort(list, function(a, b)
 		if a.isSelf ~= b.isSelf then return a.isSelf end
-		if a.isFixed ~= b.isFixed then return a.isFixed end
-		if a.isOnline ~= b.isOnline then return a.isOnline end
-		return (a.timestamp or 0) > (b.timestamp or 0)
+		if a.sameServer ~= b.sameServer then return a.sameServer end
+		return (a.playerName or "") < (b.playerName or "")
 	end)
 	return list, err
 end
 
-function scanOnlineUsers()
-	local all, err = scanAllUsers()
-	local list = {}
-	for _, u in ipairs(all) do if u.isOnline then table.insert(list, u) end end
-	return list, err
-end
-
+-- ABA CONFIG: SÓ FIXADOS NÃO EXPIRADOS (permanente)
 function scanFixedUsers()
-	local all, err = scanAllUsers()
 	local list = {}
-	for _, u in ipairs(all) do if u.isFixed and u.remaining > 0 then table.insert(list, u) end end
+	local lives, err = fetchLiveConfigs()
+	local now = os.time()
+	if type(lives) ~= "table" then return list, err or "sem dados" end
+	for _, live in pairs(lives) do
+		if type(live) == "table" and live.userId then
+			if live.isFixed == true then
+				local expiresAt = tonumber(live.expiresAt) or 0
+				local remaining = expiresAt - now
+				if remaining > 0 then
+					local cfg = live.config
+					if type(cfg) ~= "table" then cfg = {} end
+					local ts = tonumber(live.timestamp) or 0
+					local isSelf = (tonumber(live.userId) == tonumber(player.UserId))
+					local isOnline = (now - ts) <= ONLINE_TIMEOUT
+					table.insert(list, {
+						playerName = tostring(live.name or "?"),
+						displayName = tostring(live.displayName or live.name or "?"),
+						userId = live.userId,
+						carName = tostring(live.carName or cfg.carDisplayName or "—"),
+						description = tostring(live.description or ""),
+						config = cfg,
+						timestamp = ts,
+						expiresAt = expiresAt,
+						remaining = remaining,
+						isSelf = isSelf,
+						isOnline = isOnline,
+						sameServer = (tostring(live.jobId) == tostring(game.JobId)),
+					})
+				end
+			end
+		end
+	end
+	table.sort(list, function(a, b)
+		if a.isSelf ~= b.isSelf then return a.isSelf end
+		if a.isOnline ~= b.isOnline then return a.isOnline end
+		return (a.timestamp or 0) > (b.timestamp or 0)
+	end)
 	return list, err
 end
 
@@ -611,7 +628,7 @@ local titleLabel = Instance.new("TextLabel")
 titleLabel.BackgroundTransparency = 1
 titleLabel.Size = UDim2.new(1, -40, 1, 0)
 titleLabel.Position = UDim2.new(0, 12, 0, 0)
-titleLabel.Text = "Drift X v3.6"
+titleLabel.Text = "Drift X v4.0"
 titleLabel.Font = Enum.Font.GothamBold
 titleLabel.TextSize = 14
 titleLabel.TextColor3 = C.title
@@ -989,7 +1006,6 @@ carNameBox.PlaceholderText = "Vazio = nome original"
 carNameBox.FocusLost:Connect(function()
 	customCarName = carNameBox.Text:gsub("^%s+", ""):gsub("%s+$", "")
 	sharedConfig.carDisplayName = customCarName
-	if not isFixedPublished then publishConfig(false, "") end
 end)
 
 local secDrift = createSection(pageCarro, "Drift", 1)
@@ -1008,7 +1024,6 @@ makeButton(secDrift, "Inserir Config Drift", 3, function()
 	sharedConfig.driftOn = true
 	applyDrift("front", f, fw)
 	applyDrift("rear", f, fw)
-	if not isFixedPublished then publishConfig(false, "") end
 	print("Drift aplicado")
 end)
 
@@ -1027,7 +1042,6 @@ makeButton(secMotor, "Inserir Config Motor", 3, function()
 	sharedConfig.maxVel = motorState.maxVel
 	sharedConfig.maxTorque = motorState.maxTorque
 	sharedConfig.motorOn = true
-	if not isFixedPublished then publishConfig(false, "") end
 	print("Motor configurado")
 end)
 
@@ -1046,7 +1060,6 @@ makeButton(secSteer, "Inserir Config Direção", 3, function()
 	sharedConfig.maxAngle = steerState.maxAngle
 	sharedConfig.steerSpeed = steerState.speed
 	sharedConfig.steerOn = true
-	if not isFixedPublished then publishConfig(false, "") end
 	print("Direção configurada")
 end)
 
@@ -1069,7 +1082,6 @@ makeButton(secSteer, "Inserir Config Completa", 4, function()
 	sharedConfig.maxAngle = steerState.maxAngle
 	sharedConfig.steerSpeed = steerState.speed
 	sharedConfig.steerOn = true
-	if not isFixedPublished then publishConfig(false, "") end
 	print("Config completa inserida")
 end)
 
@@ -1274,7 +1286,7 @@ local secHowTo = createSection(pagePublicar, "Como Funciona", 1)
 local howToLbl = Instance.new("TextLabel")
 howToLbl.BackgroundTransparency = 1
 howToLbl.Size = UDim2.new(1, 0, 0, 90)
-howToLbl.Text = "- Sua config fica salva na nuvem por 30 dias\n- Qualquer pessoa com o script ve e pode copiar\n- Mesmo offline, sua publicacao continua disponivel\n- So apaga quando voce clicar em Remover ou expirar\n- A config que voce publicar e a que sera aplicada em quem copiar"
+howToLbl.Text = "- Sua config fica salva na nuvem por 30 dias\n- Qualquer pessoa com o script ve e pode copiar\n- Mesmo offline, sua publicacao continua disponivel\n- So apaga quando voce clicar em Remover ou expirar"
 howToLbl.TextWrapped = true
 howToLbl.Font = Enum.Font.Gotham
 howToLbl.TextSize = 11
@@ -1329,25 +1341,7 @@ padDesc.Parent = descBox
 local carNameRow = makeInput(secForm, "Nome do carro", "", 2)
 carNameRow.PlaceholderText = "Skyline do Rick"
 
-makeButton(secForm, "Pre-visualizar Publicacao", 3, function()
-	local carN = carNameRow.Text:gsub("^%s+", ""):gsub("%s+$", "")
-	if carN == "" then carN = getCarDisplayName() end
-	local desc = descBox.Text
-	local preview =
-		"Vai publicar assim:\n" ..
-		"Carro: " .. carN .. "\n" ..
-		"Descricao: " .. (desc ~= "" and desc or "(vazia)") .. "\n" ..
-		"Friction: " .. string.format("%.4g", frictionCtrl.get()) .. "\n" ..
-		"Weight: " .. string.format("%.4g", weightCtrl.get()) .. "\n" ..
-		"Velocidade: " .. string.format("%.4g", velCtrl.get()) .. "\n" ..
-		"Torque: " .. string.format("%.4g", torqueCtrl.get()) .. "\n" ..
-		"Angle: " .. string.format("%.4g", angleCtrl.get()) .. "\n" ..
-		"Steer Speed: " .. string.format("%.4g", speedCtrl.get())
-	if detailLabel then detailLabel.Text = preview end
-	print("[DriftX] Preview:\n" .. preview)
-end)
-
-local publishBtn = makeButton(secForm, "Publicar Agora (30 dias)", 4, function()
+local publishBtn = makeButton(secForm, "Publicar Agora (30 dias)", 3, function()
 	local desc = descBox.Text
 	local carN = carNameRow.Text:gsub("^%s+", ""):gsub("%s+$", "")
 	if carN == "" then carN = getCarDisplayName() end
@@ -1365,7 +1359,7 @@ local publishBtn = makeButton(secForm, "Publicar Agora (30 dias)", 4, function()
 	end)
 end)
 
-local secMyFixed = createSection(pagePublicar, "Minhas Publicacoes Ativas", 3)
+local secMyFixed = createSection(pagePublicar, "Minhas Publicacoes Ativas", 4)
 local myFixedFrame = Instance.new("Frame")
 myFixedFrame.Size = UDim2.new(1, 0, 0, 0)
 myFixedFrame.AutomaticSize = Enum.AutomaticSize.Y
@@ -1397,16 +1391,14 @@ end
 
 refreshPublishList = function()
 	clearMyFixed()
-	myFixedStatus.Text = "Buscando..."
+	myFixedStatus.Text = "🔄 Buscando..."
 	task.spawn(function()
-		local all, err = scanAllUsers()
+		local all, err = scanFixedUsers()
 		task.defer(function()
 			clearMyFixed()
 			local mine = {}
 			for _, e in ipairs(all) do
-				if e.isSelf and e.isFixed and e.remaining > 0 then
-					table.insert(mine, e)
-				end
+				if e.isSelf then table.insert(mine, e) end
 			end
 			if #mine == 0 then
 				myFixedStatus.Text = "Voce nao tem publicacoes ativas"
@@ -1504,7 +1496,7 @@ refreshPublishList = function()
 	end)
 end
 
--- ABA CONFIG
+-- ABA CONFIG (só fixados de todos, com busca/filtro)
 local secSearch = createSection(pageConfig, "🔍 Pesquisar", 1)
 
 local searchRow = Instance.new("Frame")
@@ -1647,8 +1639,6 @@ makeButton(detailSection, "📥 Copiar Config para Mim", 2, function()
 		applyDrift("front", sharedConfig.friction, sharedConfig.weight)
 		applyDrift("rear", sharedConfig.friction, sharedConfig.weight)
 		sharedConfig.driftOn = true
-		if motorState.enabled then aplicarMotor("Parar") end
-		applySteerAngle(0)
 	end
 	if detailLabel then
 		detailLabel.Text = "✅ Config copiada e aplicada!\n\n" .. detailLabel.Text
@@ -1796,7 +1786,7 @@ function renderConfigList()
 		srvLbl.BackgroundTransparency = 1
 		srvLbl.Size = UDim2.new(1, -90, 0, 12)
 		srvLbl.Position = UDim2.new(0, 22, 0, 100)
-		srvLbl.Text = (entry.isOnline and "🟢 online" or "⚪ offline") .. " · " .. (entry.sameServer and "mesmo servidor" or "outro servidor")
+		srvLbl.Text = (entry.isOnline and "🟢 online agora" or "⚪ offline") .. " · " .. (entry.sameServer and "mesmo servidor" or "outro servidor")
 		srvLbl.Font = Enum.Font.Gotham
 		srvLbl.TextSize = 9
 		srvLbl.TextColor3 = C.dim
@@ -1842,7 +1832,6 @@ end
 function refreshConfigList()
 	configStatus.Text = "🔄 Buscando..."
 	task.spawn(function()
-		if not isFixedPublished then publishConfig(false, "") end		task.wait(0.3)
 		local all, err = scanFixedUsers()
 		task.defer(function()
 			if err and #all == 0 then
@@ -1862,8 +1851,7 @@ end)
 refreshBtn.MouseButton1Click:Connect(function()
 	refreshConfigList()
 end)
-
--- ABA JOGADORES
+-- ABA JOGADORES (só online agora)
 local secOnline = createSection(pageJogadores, "🟢 Jogadores Online Agora", 1)
 
 local onlineStatus = Instance.new("TextLabel")
@@ -1911,7 +1899,7 @@ refreshPlayersList = function()
 			elseif #list == 0 then
 				onlineStatus.Text = "Ninguem online agora | " .. lastPublishMsg
 			else
-				onlineStatus.Text = tostring(#list) .. " online | " .. lastPublishMsg
+				onlineStatus.Text = tostring(#list) .. " online agora | " .. lastPublishMsg
 			end
 
 			for i, entry in ipairs(list) do
@@ -1964,7 +1952,7 @@ refreshPlayersList = function()
 				timeLbl.BackgroundTransparency = 1
 				timeLbl.Size = UDim2.new(1, -90, 0, 14)
 				timeLbl.Position = UDim2.new(0, 22, 0, 42)
-				timeLbl.Text = "📅 " .. formatDate(entry.timestamp) .. " · há " .. formatAgo(entry.age)
+				timeLbl.Text = "📅 visto há " .. formatAgo(entry.age)
 				timeLbl.Font = Enum.Font.Gotham
 				timeLbl.TextSize = 9
 				timeLbl.TextColor3 = C.dim
@@ -1988,7 +1976,7 @@ refreshPlayersList = function()
 					local lines = {
 						"👤 " .. entry.playerName,
 						"🚗 " .. entry.carName,
-						"📅 " .. formatDate(entry.timestamp),
+						"📅 visto há " .. formatAgo(entry.age),
 						"────────────",
 						string.format("Friction: %.4g", entry.config.friction or 0),
 						string.format("Weight: %.4g", entry.config.weight or 0),
@@ -2008,6 +1996,7 @@ makeButton(secOnline, "🔄 Atualizar Lista", 3, function()
 	refreshPlayersList()
 end)
 
+-- Centralizar menu
 task.defer(function()
 	task.wait(0.15)
 	local vp = camera.ViewportSize
@@ -2017,6 +2006,7 @@ task.defer(function()
 		menu.Position = UDim2.new(0, (vp.X - w) / 2, 0, (vp.Y - h) / 2)
 	end
 end)
+
 -- MOBILE
 local isMobile = UserInputService.TouchEnabled
 
@@ -2279,7 +2269,7 @@ local conn3 = RunService.RenderStepped:Connect(function(dt)
 
 	if publishTick >= 25 then
 		publishTick = 0
-		if not isFixedPublished and currentCar and isPlayerInCar(currentCar) then
+		if currentCar and isPlayerInCar(currentCar) then
 			publishConfig(false, "")
 		end
 	end
@@ -2316,14 +2306,7 @@ local conn3 = RunService.RenderStepped:Connect(function(dt)
 		steerState.isD = false
 		steerState.currentSteer = 0
 		if steerState.enabled then applySteerAngle(0) end
-		if isFixedPublished and fixedData and type(fixedData.config) == "table" then
-			task.defer(function()
-				applyDrift("front", sharedConfig.friction, sharedConfig.weight)
-				applyDrift("rear", sharedConfig.friction, sharedConfig.weight)
-			end)
-		else
-			publishConfig(false, "")
-		end
+		if not isFixedPublished then publishConfig(false, "") end
 	end
 	wasInCar = inCar
 
