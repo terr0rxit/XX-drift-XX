@@ -44,6 +44,35 @@ local mobileButtons, lockButtons = {}, {}
 local uiState = { scale = 0.75, locked = false }
 local customCarName = ""
 
+--------------------------------------------------------------------
+-- Firebase Online (mesmo método do Car Customizer)
+-- Usa request do executor (syn.request / http_request / request)
+--------------------------------------------------------------------
+local FIREBASE_LIVE = "https://online-5f25a-default-rtdb.firebaseio.com/driftx/live"
+local ONLINE_TIMEOUT = 240 -- segundos sem update = offline
+
+local function httpRequest(opts)
+	local req = (syn and syn.request) or (http and http.request) or http_request or request
+	if not req then
+		return { StatusCode = 0, Body = "", Error = "sem request (ative HttpRequest no executor)" }
+	end
+	local ok, r = pcall(req, opts)
+	if not ok then
+		return { StatusCode = 0, Body = "", Error = tostring(r) }
+	end
+	if type(r) ~= "table" then
+		return { StatusCode = 0, Body = "", Error = "resposta invalida" }
+	end
+	local code = r.StatusCode or r.Status or r.status_code or r.status or 0
+	local body = r.Body or r.body or ""
+	return {
+		StatusCode = tonumber(code) or 0,
+		Body = tostring(body),
+		Success = r.Success == true or tonumber(code) == 200 or tonumber(code) == 201
+	}
+end
+
+
 local sharedConfig = {
 	friction = 0.30,
 	weight = 1.00,
@@ -120,55 +149,102 @@ function makeDraggable(frame, handle)
 end
 
 --------------------------------------------------------------------
--- Broadcast config
+-- Broadcast config (Firebase)
 --------------------------------------------------------------------
 function publishConfig()
 	local car = currentCar or findPlayerCar()
-	if not car then return end
-	sharedConfig.carDisplayName = (customCarName ~= "" and customCarName) or car.Name
-	pcall(function()
-		car:SetAttribute("DriftX_User", player.Name)
-		car:SetAttribute("DriftX_Car", sharedConfig.carDisplayName)
-		car:SetAttribute("DriftX_Config", HttpService:JSONEncode(sharedConfig))
-		car:SetAttribute("DriftX_Time", os.time())
+	local displayName = customCarName
+	if displayName == "" and car then
+		displayName = car.Name
+	elseif displayName == "" then
+		displayName = "Sem carro"
+	end
+	sharedConfig.carDisplayName = displayName
+
+	local data = {
+		name = player.Name,
+		userId = player.UserId,
+		carName = displayName,
+		config = sharedConfig,
+		jobId = game.JobId,
+		timestamp = os.time(),
+	}
+
+	task.spawn(function()
+		pcall(function()
+			httpRequest({
+				Url = FIREBASE_LIVE .. "/" .. tostring(player.UserId) .. ".json",
+				Method = "PUT",
+				Headers = { ["Content-Type"] = "application/json" },
+				Body = HttpService:JSONEncode(data),
+			})
+		end)
 	end)
 end
 
 function clearPublishedConfig()
-	local car = currentCar
-	if not car then return end
-	pcall(function()
-		car:SetAttribute("DriftX_User", nil)
-		car:SetAttribute("DriftX_Car", nil)
-		car:SetAttribute("DriftX_Config", nil)
-		car:SetAttribute("DriftX_Time", nil)
+	task.spawn(function()
+		pcall(function()
+			httpRequest({
+				Url = FIREBASE_LIVE .. "/" .. tostring(player.UserId) .. ".json",
+				Method = "DELETE",
+			})
+		end)
 	end)
+end
+
+function fetchLiveConfigs()
+	local ok, res = pcall(function()
+		local r = httpRequest({
+			Url = FIREBASE_LIVE .. ".json",
+			Method = "GET",
+			Headers = { ["Content-Type"] = "application/json" },
+		})
+		if not r or r.StatusCode ~= 200 then return {} end
+		local body = r.Body or ""
+		if body == "" or body == "null" then return {} end
+		local data = HttpService:JSONDecode(body)
+		if type(data) ~= "table" then return {} end
+		return data
+	end)
+	return (ok and type(res) == "table") and res or {}
 end
 
 function scanOnlineUsers()
 	local list = {}
-	local carsFolder = workspace:FindFirstChild("Cars")
-	if not carsFolder then return list end
+	local lives = fetchLiveConfigs()
 	local now = os.time()
-	for _, car in ipairs(carsFolder:GetChildren()) do
-		if car:IsA("Model") then
-			local user = car:GetAttribute("DriftX_User")
-			local cfgJson = car:GetAttribute("DriftX_Config")
-			local t = car:GetAttribute("DriftX_Time")
-			local display = car:GetAttribute("DriftX_Car")
-			if user and cfgJson and t and (now - tonumber(t) <= 30) then
-				local ok, cfg = pcall(function() return HttpService:JSONDecode(cfgJson) end)
-				if ok and type(cfg) == "table" then
+	local playersInServer = {}
+	for _, p in ipairs(Players:GetPlayers()) do
+		playersInServer[p.UserId] = p
+	end
+
+	for _, live in pairs(lives) do
+		if type(live) == "table" and live.userId then
+			local age = now - (tonumber(live.timestamp) or 0)
+			if age <= ONLINE_TIMEOUT then
+				-- só quem está no mesmo servidor
+				local p = playersInServer[live.userId]
+				if p or live.userId == player.UserId then
+					local cfg = live.config
+					if type(cfg) ~= "table" then cfg = {} end
 					table.insert(list, {
-						playerName = tostring(user),
-						carName = tostring(display or car.Name),
-						car = car,
+						playerName = tostring(live.name or (p and p.Name) or "?"),
+						userId = live.userId,
+						carName = tostring(live.carName or cfg.carDisplayName or "—"),
 						config = cfg,
+						age = age,
+						isSelf = (live.userId == player.UserId),
 					})
 				end
 			end
 		end
 	end
+
+	table.sort(list, function(a, b)
+		if a.isSelf ~= b.isSelf then return a.isSelf end
+		return (a.playerName or "") < (b.playerName or "")
+	end)
 	return list
 end
 
@@ -1202,59 +1278,68 @@ end
 
 refreshPlayersList = function()
 	clearPlayersList()
-	local list = scanOnlineUsers()
-	onlineStatus.Text = (#list == 0)
-		and "Nenhum usuário Drift X detectado"
-		or (tostring(#list) .. " usuário(s) online")
+	onlineStatus.Text = "Buscando no Firebase..."
 
-	for i, entry in ipairs(list) do
-		local card = Instance.new("Frame")
-		card.Size = UDim2.new(1, 0, 0, 56)
-		card.BackgroundColor3 = C.inputBg
-		card.LayoutOrder = i
-		card.Parent = playersListFrame
-		uiCorner(card, 6)
-		uiStroke(card, C.border, 1)
+	task.spawn(function()
+		local list = scanOnlineUsers()
+		-- precisa atualizar UI na thread principal
+		task.defer(function()
+			clearPlayersList()
+			onlineStatus.Text = (#list == 0)
+				and "Nenhum usuário Drift X online neste servidor"
+				or (tostring(#list) .. " usuário(s) online")
 
-		local nameLbl = Instance.new("TextLabel")
-		nameLbl.BackgroundTransparency = 1
-		nameLbl.Size = UDim2.new(1, -90, 0, 20)
-		nameLbl.Position = UDim2.new(0, 8, 0, 6)
-		nameLbl.Text = entry.playerName
-		nameLbl.Font = Enum.Font.GothamBold
-		nameLbl.TextSize = 12
-		nameLbl.TextColor3 = C.text
-		nameLbl.TextXAlignment = Enum.TextXAlignment.Left
-		nameLbl.Parent = card
+			for i, entry in ipairs(list) do
+				local card = Instance.new("Frame")
+				card.Size = UDim2.new(1, 0, 0, 56)
+				card.BackgroundColor3 = entry.isSelf and Color3.fromRGB(20, 40, 20) or C.inputBg
+				card.LayoutOrder = i
+				card.Parent = playersListFrame
+				uiCorner(card, 6)
+				uiStroke(card, entry.isSelf and C.green or C.border, 1)
 
-		local carLbl = Instance.new("TextLabel")
-		carLbl.BackgroundTransparency = 1
-		carLbl.Size = UDim2.new(1, -90, 0, 18)
-		carLbl.Position = UDim2.new(0, 8, 0, 28)
-		carLbl.Text = "Carro: " .. tostring(entry.carName)
-		carLbl.Font = Enum.Font.Gotham
-		carLbl.TextSize = 10
-		carLbl.TextColor3 = C.dim
-		carLbl.TextXAlignment = Enum.TextXAlignment.Left
-		carLbl.Parent = card
+				local nameLbl = Instance.new("TextLabel")
+				nameLbl.BackgroundTransparency = 1
+				nameLbl.Size = UDim2.new(1, -90, 0, 20)
+				nameLbl.Position = UDim2.new(0, 8, 0, 6)
+				nameLbl.Text = entry.playerName .. (entry.isSelf and "  (você)" or "")
+				nameLbl.Font = Enum.Font.GothamBold
+				nameLbl.TextSize = 12
+				nameLbl.TextColor3 = C.text
+				nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+				nameLbl.Parent = card
 
-		local verBtn = Instance.new("TextButton")
-		verBtn.Size = UDim2.new(0, 72, 0, 40)
-		verBtn.Position = UDim2.new(1, -80, 0.5, -20)
-		verBtn.BackgroundColor3 = C.apply
-		verBtn.Text = "Ver Config"
-		verBtn.Font = Enum.Font.GothamBold
-		verBtn.TextSize = 10
-		verBtn.TextColor3 = C.text
-		verBtn.Parent = card
-		uiCorner(verBtn, 6)
-		table.insert(themedButtons, verBtn)
+				local carLbl = Instance.new("TextLabel")
+				carLbl.BackgroundTransparency = 1
+				carLbl.Size = UDim2.new(1, -90, 0, 18)
+				carLbl.Position = UDim2.new(0, 8, 0, 28)
+				local ago = entry.age < 60 and (entry.age .. "s") or (math.floor(entry.age / 60) .. "min")
+				carLbl.Text = "Carro: " .. tostring(entry.carName) .. " · " .. ago .. " atrás"
+				carLbl.Font = Enum.Font.Gotham
+				carLbl.TextSize = 10
+				carLbl.TextColor3 = C.dim
+				carLbl.TextXAlignment = Enum.TextXAlignment.Left
+				carLbl.Parent = card
 
-		verBtn.MouseButton1Click:Connect(function()
-			selectedRemoteConfig = entry.config
-			configPreview.Text = formatConfigText(entry.config, entry.playerName, entry.carName)
+				local verBtn = Instance.new("TextButton")
+				verBtn.Size = UDim2.new(0, 72, 0, 40)
+				verBtn.Position = UDim2.new(1, -80, 0.5, -20)
+				verBtn.BackgroundColor3 = C.apply
+				verBtn.Text = "Ver Config"
+				verBtn.Font = Enum.Font.GothamBold
+				verBtn.TextSize = 10
+				verBtn.TextColor3 = C.text
+				verBtn.Parent = card
+				uiCorner(verBtn, 6)
+				table.insert(themedButtons, verBtn)
+
+				verBtn.MouseButton1Click:Connect(function()
+					selectedRemoteConfig = entry.config
+					configPreview.Text = formatConfigText(entry.config, entry.playerName, entry.carName)
+				end)
+			end
 		end)
-	end
+	end)
 end
 
 makeButton(secOnline, "Atualizar Lista", 3, function()
@@ -1540,7 +1625,7 @@ local conn3 = RunService.RenderStepped:Connect(function(dt)
 	updateTick += dt
 	publishTick += dt
 
-	if publishTick >= 4 then
+	if publishTick >= 25 then
 		publishTick = 0
 		if currentCar and isPlayerInCar(currentCar) then
 			publishConfig()
@@ -1623,3 +1708,15 @@ player.CharacterAdded:Connect(function()
 	task.wait(0.4)
 	resetSteerOnExit()
 end)
+
+-- presença online inicial + limpa ao sair
+task.spawn(function()
+	task.wait(1)
+	publishConfig()
+end)
+game:GetService("Players").PlayerRemoving:Connect(function(p)
+	if p == player then
+		clearPublishedConfig()
+	end
+end)
+
