@@ -1,6 +1,5 @@
 -- ╔══════════════════════════════════════════════════════════════╗
--- ║                    Drift X  Controller v3                     ║
--- ║      Carro | HUD | Painel | Jogadores | Publicar | Config     ║
+-- ║                    Drift X  Controller v3.2                   ║
 -- ╚══════════════════════════════════════════════════════════════╝
 local Players          = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -44,6 +43,12 @@ local motorFrame, steerFrame
 local mobileButtons, lockButtons = {}, {}
 local uiState = { scale = 0.75, locked = false }
 local customCarName = ""
+
+local liveCounters = {}
+local detailLabel
+local configPreview
+local selectedRemoteConfig
+local selectedConfigEntry
 
 --------------------------------------------------------------------
 -- Firebase
@@ -255,8 +260,10 @@ function publishConfig(isFixed, desc)
 		if ok and res and res.Success then
 			lastPublishOk = true
 			lastPublishMsg = "online (" .. os.date("%H:%M:%S") .. ")"
-			isFixedPublished = isFixed or false
-			fixedDescription = desc or ""
+			if isFixed then
+				isFixedPublished = true
+				fixedDescription = desc or ""
+			end
 		else
 			lastPublishOk = false
 			lastPublishMsg = "falha: " .. (lastHttpError ~= "" and lastHttpError or "desconhecida")
@@ -265,8 +272,30 @@ function publishConfig(isFixed, desc)
 	end)
 end
 
-function clearPublishedConfig(force)
-	if isFixedPublished and not force then return end
+-- ✅ NOVO: checa se já tem publicação fixada sua no Firebase
+function checkMyFixedStatus()
+	task.spawn(function()
+		local r = httpRequest({
+			Url = FIREBASE_LIVE .. "/" .. tostring(player.UserId) .. ".json",
+			Method = "GET",
+			Headers = { ["Content-Type"] = "application/json" },
+		})
+		if r and r.Success and r.Body and r.Body ~= "" and r.Body ~= "null" then
+			local ok, data = pcall(function() return HttpService:JSONDecode(r.Body) end)
+			if ok and type(data) == "table" then
+				if data.isFixed == true then
+					local expiresAt = tonumber(data.expiresAt) or 0
+					if expiresAt > os.time() then
+						isFixedPublished = true
+						fixedDescription = tostring(data.description or "")
+					end
+				end
+			end
+		end
+	end)
+end
+
+function clearPublishedConfig()
 	task.spawn(function()
 		pcall(function()
 			httpRequest({
@@ -276,6 +305,7 @@ function clearPublishedConfig(force)
 		end)
 	end)
 	isFixedPublished = false
+	fixedDescription = ""
 end
 
 function fetchLiveConfigs()
@@ -372,7 +402,7 @@ function scanFixedUsers()
 end
 
 --------------------------------------------------------------------
--- CARRO (core)
+-- CARRO
 --------------------------------------------------------------------
 function findPlayerCar()
 	if player.Character then
@@ -588,12 +618,12 @@ sg.ResetOnSpawn = false
 sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 sg.IgnoreGuiInset = true
 sg.Parent = playerGui
+
 sg:GetPropertyChangedSignal("Parent"):Connect(function()
 	if not sg.Parent then
 		for _, c in ipairs(connections) do
 			pcall(function() c:Disconnect() end)
 		end
-		clearPublishedConfig()
 	end
 end)
 
@@ -641,7 +671,7 @@ local titleLabel = Instance.new("TextLabel")
 titleLabel.BackgroundTransparency = 1
 titleLabel.Size = UDim2.new(1, -40, 1, 0)
 titleLabel.Position = UDim2.new(0, 12, 0, 0)
-titleLabel.Text = "Drift X v3"
+titleLabel.Text = "Drift X v3.2"
 titleLabel.Font = Enum.Font.GothamBold
 titleLabel.TextSize = 14
 titleLabel.TextColor3 = C.title
@@ -677,7 +707,6 @@ local tabs, pages = {}, {}
 local refreshPlayersList
 local refreshConfigList
 local refreshPublishList
-local liveCounters = {}
 
 function createTab(name)
 	local btn = Instance.new("TextButton")
@@ -1036,7 +1065,7 @@ carNameBox.PlaceholderText = "Vazio = nome original"
 carNameBox.FocusLost:Connect(function()
 	customCarName = carNameBox.Text:gsub("^%s+", ""):gsub("%s+$", "")
 	sharedConfig.carDisplayName = customCarName
-	publishConfig(false, "")
+	publishConfig(isFixedPublished, fixedDescription)
 end)
 
 local secDrift = createSection(pageCarro, "Drift", 1)
@@ -1298,7 +1327,7 @@ for i, theme in ipairs(THEMES) do
 end
 
 --------------------------------------------------------------------
--- Contador em tempo real (global)
+-- Contador em tempo real
 --------------------------------------------------------------------
 function addLiveCounter(lbl, expiresAt)
 	table.insert(liveCounters, { label = lbl, expiresAt = expiresAt })
@@ -1523,7 +1552,7 @@ refreshPublishList = function()
 				uiCorner(delBtn, 6)
 
 				delBtn.MouseButton1Click:Connect(function()
-					clearPublishedConfig(true)
+					clearPublishedConfig()
 					task.wait(0.4)
 					if refreshPublishList then refreshPublishList() end
 					if refreshConfigList then refreshConfigList() end
@@ -1650,7 +1679,7 @@ configListLayout.Padding = UDim.new(0, 8)
 configListLayout.Parent = configListFrame
 
 local detailSection = createSection(pageConfig, "Detalhes", 3)
-local detailLabel = Instance.new("TextLabel")
+detailLabel = Instance.new("TextLabel")
 detailLabel.BackgroundTransparency = 1
 detailLabel.Size = UDim2.new(1, 0, 0, 160)
 detailLabel.Text = "Clique em 'Ver' em alguma publicacao"
@@ -1662,9 +1691,6 @@ detailLabel.TextYAlignment = Enum.TextYAlignment.Top
 detailLabel.TextXAlignment = Enum.TextXAlignment.Left
 detailLabel.LayoutOrder = 1
 detailLabel.Parent = detailSection
-
-local selectedConfigEntry = nil
-local selectedRemoteConfig = nil
 
 makeButton(detailSection, "Copiar Config para Mim", 2, function()
 	if not selectedConfigEntry then
@@ -2349,7 +2375,9 @@ local conn3 = RunService.RenderStepped:Connect(function(dt)
 		updateTick = 0
 		local found = findPlayerCar()
 		if found ~= currentCar then
-			if currentCar and not isFixedPublished then clearPublishedConfig() end
+			if currentCar and not isFixedPublished then
+				clearPublishedConfig()
+			end
 			currentCar = found
 			driftOriginals = { front = nil, rear = nil }
 			resetSteerOnExit()
@@ -2365,7 +2393,9 @@ local conn3 = RunService.RenderStepped:Connect(function(dt)
 	if wasInCar and not inCar then
 		resetSteerOnExit()
 		if motorState.enabled then aplicarMotor("Parar") end
-		if not isFixedPublished then clearPublishedConfig() end
+		if not isFixedPublished then
+			clearPublishedConfig()
+		end
 		currentCar = nil
 	end
 	if (not wasInCar) and inCar then
@@ -2422,15 +2452,14 @@ player.CharacterAdded:Connect(function()
 	resetSteerOnExit()
 end)
 
+-- ✅ NOVO: ao iniciar, checa se já tem publicação fixada sua no Firebase
+checkMyFixedStatus()
+
 task.spawn(function()
+	task.wait(1)
+	checkMyFixedStatus()
 	task.wait(1)
 	publishConfig(isFixedPublished, fixedDescription)
 end)
 
-game:GetService("Players").PlayerRemoving:Connect(function(p)
-	if p == player then
-		if not isFixedPublished then
-			clearPublishedConfig()
-		end
-	end
-end)
+-- ✅ NÃO tem mais PlayerRemoving. Só apaga se clicar em Remover.
