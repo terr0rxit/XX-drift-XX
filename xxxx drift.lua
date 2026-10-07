@@ -44,6 +44,48 @@ local mobileButtons, lockButtons = {}, {}
 local uiState = { scale = 0.75, locked = false }
 local customCarName = ""
 
+--------------------------------------------------------------------
+-- Firebase Online (SEU BANCO)
+--------------------------------------------------------------------
+local FIREBASE_LIVE = "https://drift-x-3edf5-default-rtdb.firebaseio.com/driftx/live"
+local ONLINE_TIMEOUT = 240
+
+local lastHttpError = ""
+local function hasHttpRequest()
+	return (syn and syn.request) or (http and http.request) or http_request or request
+end
+
+local function httpRequest(opts)
+	local req = hasHttpRequest()
+	if not req then
+		lastHttpError = "sem request — ative HttpRequest no executor"
+		return { StatusCode = 0, Body = "", Error = lastHttpError, Success = false }
+	end
+	local ok, r = pcall(req, opts)
+	if not ok then
+		lastHttpError = tostring(r)
+		return { StatusCode = 0, Body = "", Error = lastHttpError, Success = false }
+	end
+	if type(r) ~= "table" then
+		lastHttpError = "resposta invalida do request"
+		return { StatusCode = 0, Body = "", Error = lastHttpError, Success = false }
+	end
+	local code = r.StatusCode or r.Status or r.status_code or r.status or 0
+	local body = r.Body or r.body or ""
+	local success = r.Success == true or tonumber(code) == 200 or tonumber(code) == 201
+	if not success then
+		lastHttpError = "HTTP " .. tostring(code) .. " " .. tostring(body):sub(1, 80)
+	else
+		lastHttpError = ""
+	end
+	return {
+		StatusCode = tonumber(code) or 0,
+		Body = tostring(body),
+		Success = success,
+		Error = lastHttpError,
+	}
+end
+
 local sharedConfig = {
 	friction = 0.30,
 	weight = 1.00,
@@ -59,36 +101,74 @@ local sharedConfig = {
 }
 
 --------------------------------------------------------------------
--- Online (Firebase — mesmo método do Car Customizer)
+-- Utils
 --------------------------------------------------------------------
-local FIREBASE_DB = "https://online-5f25a-default-rtdb.firebaseio.com"
-local FIREBASE_LIVE = FIREBASE_DB .. "/driftx/live"
-local ONLINE_TIMEOUT = 240
-
-local function httpRequest(opts)
-	local req = (syn and syn.request)
-		or (http and http.request)
-		or http_request
-		or request
-		or (fluxus and fluxus.request)
-	if not req then
-		return { StatusCode = 0, Body = "", Success = false }
-	end
-	local ok, r = pcall(req, opts)
-	if not ok or type(r) ~= "table" then
-		return { StatusCode = 0, Body = "", Success = false }
-	end
-	local code = tonumber(r.StatusCode or r.Status or r.status_code or r.status or 0) or 0
-	local body = tostring(r.Body or r.body or "")
-	return {
-		StatusCode = code,
-		Body = body,
-		Success = r.Success == true or code == 200 or code == 201,
-	}
+function parseNum(str)
+	return tonumber((tostring(str):gsub(",", ".")))
 end
 
+function uiCorner(parent, r)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, r or 6)
+	c.Parent = parent
+end
+
+function uiStroke(parent, color, thick)
+	local s = Instance.new("UIStroke")
+	s.Color = color or C.border
+	s.Thickness = thick or 1
+	s.Parent = parent
+	return s
+end
+
+function makeDraggable(frame, handle)
+	local dragging, dragStart, startPos, locked = false, nil, nil, false
+	handle = handle or frame
+	local function beginDrag(input)
+		if locked then return end
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = frame.Position
+		end
+	end
+	local function endDrag(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end
+	handle.InputBegan:Connect(beginDrag)
+	handle.InputEnded:Connect(endDrag)
+	local conn = UserInputService.InputChanged:Connect(function(input)
+		if locked or not dragging then return end
+		if input.UserInputType == Enum.UserInputType.MouseMovement
+			or input.UserInputType == Enum.UserInputType.Touch then
+			local d = input.Position - dragStart
+			frame.Position = UDim2.new(
+				startPos.X.Scale, startPos.X.Offset + d.X,
+				startPos.Y.Scale, startPos.Y.Offset + d.Y
+			)
+		end
+	end)
+	table.insert(connections, conn)
+	local conn2 = UserInputService.InputEnded:Connect(endDrag)
+	table.insert(connections, conn2)
+	return function(state)
+		locked = state
+		if state then dragging = false end
+	end, beginDrag
+end
+
+--------------------------------------------------------------------
+-- Broadcast config (Firebase)
+--------------------------------------------------------------------
+local lastPublishOk = false
+local lastPublishMsg = "ainda não publicou"
+
 function publishConfig()
-	local car = currentCar or (findPlayerCar and findPlayerCar()) or nil
+	local car = currentCar or findPlayerCar()
 	local displayName = customCarName
 	if displayName == "" and car then
 		displayName = car.Name
@@ -115,18 +195,27 @@ function publishConfig()
 			carDisplayName = displayName,
 		},
 		jobId = game.JobId,
+		serverPlace = game.PlaceId,
 		timestamp = os.time(),
 	}
 
 	task.spawn(function()
-		pcall(function()
-			httpRequest({
+		local ok, res = pcall(function()
+			return httpRequest({
 				Url = FIREBASE_LIVE .. "/" .. tostring(player.UserId) .. ".json",
 				Method = "PUT",
 				Headers = { ["Content-Type"] = "application/json" },
 				Body = HttpService:JSONEncode(data),
 			})
 		end)
+		if ok and res and res.Success then
+			lastPublishOk = true
+			lastPublishMsg = "online ✓ (" .. os.date("%H:%M:%S") .. ")"
+		else
+			lastPublishOk = false
+			lastPublishMsg = "falha: " .. (lastHttpError ~= "" and lastHttpError or "desconhecida")
+			warn("[DriftX Online] " .. lastPublishMsg)
+		end
 	end)
 end
 
@@ -142,30 +231,34 @@ function clearPublishedConfig()
 end
 
 function fetchLiveConfigs()
-	local ok, res = pcall(function()
-		local r = httpRequest({
-			Url = FIREBASE_LIVE .. ".json",
-			Method = "GET",
-			Headers = { ["Content-Type"] = "application/json" },
-		})
-		if not r or r.StatusCode ~= 200 then return {} end
-		local body = r.Body or ""
-		if body == "" or body == "null" then return {} end
-		local data = HttpService:JSONDecode(body)
-		if type(data) ~= "table" then return {} end
-		return data
-	end)
-	return (ok and type(res) == "table") and res or {}
+	if not hasHttpRequest() then
+		lastHttpError = "sem request — ative HttpRequest no executor"
+		return {}, lastHttpError
+	end
+	local r = httpRequest({
+		Url = FIREBASE_LIVE .. ".json",
+		Method = "GET",
+		Headers = { ["Content-Type"] = "application/json" },
+	})
+	if not r or not r.Success then
+		return {}, (r and r.Error) or lastHttpError or "GET falhou"
+	end
+	local body = r.Body or ""
+	if body == "" or body == "null" then return {}, nil end
+	local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+	if not ok or type(data) ~= "table" then
+		return {}, "JSON inválido"
+	end
+	return data, nil
 end
 
 function scanOnlineUsers()
 	local list = {}
-	local lives = fetchLiveConfigs()
+	local lives, err = fetchLiveConfigs()
 	local now = os.time()
-	local playersInServer = {}
-	for _, p in ipairs(Players:GetPlayers()) do
-		playersInServer[p.UserId] = p
-		playersInServer[tostring(p.UserId)] = p
+
+	if type(lives) ~= "table" then
+		return list, err or "sem dados"
 	end
 
 	for _, live in pairs(lives) do
@@ -173,28 +266,28 @@ function scanOnlineUsers()
 			local age = now - (tonumber(live.timestamp) or 0)
 			if age <= ONLINE_TIMEOUT then
 				local uid = live.userId
-				local p = playersInServer[uid] or playersInServer[tostring(uid)]
-				if p or tonumber(uid) == player.UserId then
-					local cfg = live.config
-					if type(cfg) ~= "table" then cfg = {} end
-					table.insert(list, {
-						playerName = tostring(live.name or (p and p.Name) or "?"),
-						userId = uid,
-						carName = tostring(live.carName or cfg.carDisplayName or "—"),
-						config = cfg,
-						age = age,
-						isSelf = (tonumber(uid) == player.UserId),
-					})
-				end
+				local cfg = live.config
+				if type(cfg) ~= "table" then cfg = {} end
+				local isSelf = (tonumber(uid) == player.UserId) or (tostring(uid) == tostring(player.UserId))
+				table.insert(list, {
+					playerName = tostring(live.name or "?"),
+					userId = uid,
+					carName = tostring(live.carName or cfg.carDisplayName or "—"),
+					config = cfg,
+					age = age,
+					isSelf = isSelf,
+					sameServer = (live.jobId == game.JobId),
+				})
 			end
 		end
 	end
 
 	table.sort(list, function(a, b)
 		if a.isSelf ~= b.isSelf then return a.isSelf end
+		if a.sameServer ~= b.sameServer then return a.sameServer end
 		return (a.playerName or "") < (b.playerName or "")
 	end)
-	return list
+	return list, err
 end
 
 --------------------------------------------------------------------
@@ -652,7 +745,6 @@ function makeInput(parent, label, default, order)
 	return box
 end
 
--- Barra limitada + digitar SEM limite
 function makeSliderWithInput(parent, label, minV, maxV, default, order, decimals)
 	local row = Instance.new("Frame")
 	row.Size = UDim2.new(1, 0, 0, 48)
@@ -852,7 +944,6 @@ function makeValueInput(parent, label, default, order, decimals)
 		box = box,
 	}
 end
-
 --------------------------------------------------------------------
 -- ABA CARRO
 --------------------------------------------------------------------
@@ -1122,9 +1213,9 @@ for i, theme in ipairs(THEMES) do
 end
 
 --------------------------------------------------------------------
--- ABA JOGADORES
+-- ABA JOGADORES (mostra QUALQUER servidor)
 --------------------------------------------------------------------
-local secOnline = createSection(pageJogadores, "Usuários Online (mesmo servidor)", 1)
+local secOnline = createSection(pageJogadores, "Usuários Online (todos os servidores)", 1)
 
 local onlineStatus = Instance.new("TextLabel")
 onlineStatus.BackgroundTransparency = 1
@@ -1227,17 +1318,22 @@ end
 
 refreshPlayersList = function()
 	clearPlayersList()
-	onlineStatus.Text = "Carregando..."
+	local reqOk = hasHttpRequest() ~= nil
+	onlineStatus.Text = reqOk and ("Buscando... | " .. lastPublishMsg) or "⚠️ Ative HttpRequest no executor!"
 
 	task.spawn(function()
 		publishConfig()
-		task.wait(0.35)
-		local list = scanOnlineUsers()
+		task.wait(0.4)
+		local list, err = scanOnlineUsers()
 		task.defer(function()
 			clearPlayersList()
-			onlineStatus.Text = (#list == 0)
-				and "Nenhum player com o script online no momento."
-				or (tostring(#list) .. " player(s) online")
+			if err and #list == 0 then
+				onlineStatus.Text = "Erro: " .. tostring(err)
+			elseif #list == 0 then
+				onlineStatus.Text = "Nenhum Drift X online | " .. lastPublishMsg
+			else
+				onlineStatus.Text = tostring(#list) .. " online | " .. lastPublishMsg
+			end
 
 			for i, entry in ipairs(list) do
 				local card = Instance.new("Frame")
@@ -1246,13 +1342,20 @@ refreshPlayersList = function()
 				card.LayoutOrder = i
 				card.Parent = playersListFrame
 				uiCorner(card, 6)
-				uiStroke(card, entry.isSelf and C.green or C.border, 1)
+				local cardStroke = uiStroke(card, entry.isSelf and C.green or C.border, 1)
+				if entry.sameServer and not entry.isSelf then
+					cardStroke.Color = Color3.fromRGB(0, 130, 60)
+				end
 
 				local nameLbl = Instance.new("TextLabel")
 				nameLbl.BackgroundTransparency = 1
 				nameLbl.Size = UDim2.new(1, -90, 0, 20)
 				nameLbl.Position = UDim2.new(0, 8, 0, 6)
-				nameLbl.Text = entry.playerName .. (entry.isSelf and "  (você)" or "")
+				local tag = ""
+				if entry.isSelf then tag = "  (você)"
+				elseif entry.sameServer then tag = "  (mesmo servidor)"
+				else tag = "  (outro servidor)" end
+				nameLbl.Text = entry.playerName .. tag
 				nameLbl.Font = Enum.Font.GothamBold
 				nameLbl.TextSize = 12
 				nameLbl.TextColor3 = C.text
@@ -1263,8 +1366,11 @@ refreshPlayersList = function()
 				carLbl.BackgroundTransparency = 1
 				carLbl.Size = UDim2.new(1, -90, 0, 18)
 				carLbl.Position = UDim2.new(0, 8, 0, 28)
-				local ago = entry.age < 60 and (entry.age .. "s atrás") or (math.floor(entry.age / 60) .. "min atrás")
-				carLbl.Text = "Carro: " .. tostring(entry.carName) .. " · " .. ago
+				local ago
+				if entry.age < 60 then ago = entry.age .. "s"
+				elseif entry.age < 3600 then ago = math.floor(entry.age / 60) .. "min"
+				else ago = math.floor(entry.age / 3600) .. "h" end
+				carLbl.Text = "Carro: " .. tostring(entry.carName) .. " · há " .. ago
 				carLbl.Font = Enum.Font.Gotham
 				carLbl.TextSize = 10
 				carLbl.TextColor3 = C.dim
@@ -1295,7 +1401,14 @@ end
 makeButton(secOnline, "Atualizar Lista", 3, function()
 	refreshPlayersList()
 end)
-
+makeButton(secOnline, "Publicar Minha Presença", 4, function()
+	publishConfig()
+	onlineStatus.Text = "Publicando... | " .. lastPublishMsg
+	task.delay(0.6, function()
+		onlineStatus.Text = lastPublishMsg
+		refreshPlayersList()
+	end)
+end)
 
 --------------------------------------------------------------------
 task.defer(function()
@@ -1670,4 +1783,3 @@ game:GetService("Players").PlayerRemoving:Connect(function(p)
 		clearPublishedConfig()
 	end
 end)
-
