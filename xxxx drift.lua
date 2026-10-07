@@ -30,7 +30,6 @@ local motorFrame, steerFrame
 local mobileButtons, lockButtons = {}, {}
 local uiState = { scale = 0.75, locked = false }
 
-local onlineCarName = ""
 local publishCarName = ""
 
 local liveCounters = {}
@@ -157,24 +156,9 @@ function formatRemaining(sec)
 	else return string.format("%ds", s) end
 end
 
-function getOnlineName()
-	if onlineCarName and onlineCarName ~= "" then return onlineCarName end
-	return getCarModelName()
-end
-
 function getPublishName()
 	if publishCarName and publishCarName ~= "" then return publishCarName end
-	return getCarModelName()
-end
-
-function getCarModelName()
-	local car = currentCar or findPlayerCar()
-	if not car then return "Sem carro" end
-	local n = car.Name or ""
-	if n:match("^%d+$") or n:match("^Model") or n:match("^Car_%d+") or n:match("^Vehicle") or n:match("^%x%x%x%x%x%x%x%x%-") or #n < 3 then
-		return "Carro de " .. (player.DisplayName or player.Name)
-	end
-	return n
+	return "Sem nome"
 end
 local lastPublishOk = false
 local lastPublishMsg = "ainda nao publicou"
@@ -191,7 +175,6 @@ function captureConfigSnapshot()
 		maxAngle = sharedConfig.maxAngle, steerSpeed = sharedConfig.steerSpeed,
 		driftOn = sharedConfig.driftOn, motorOn = sharedConfig.motorOn,
 		steerOn = sharedConfig.steerOn, autoAlign = sharedConfig.autoAlign,
-		carDisplayName = getOnlineName(),
 	}
 end
 
@@ -218,10 +201,10 @@ end
 function buildOnlineData()
 	return {
 		name = player.Name, displayName = player.DisplayName or player.Name,
-		userId = player.UserId, carName = getOnlineName(),
+		userId = player.UserId,
 		config = captureConfigSnapshot(),
 		jobId = game.JobId, serverPlace = game.PlaceId, timestamp = os.time(),
-		isFixed = false, expiresAt = 0, description = "",
+		isFixed = false, expiresAt = 0, description = "", carName = "",
 	}
 end
 
@@ -245,6 +228,8 @@ function publishOnline()
 				if ok and type(existing) == "table" and existing.isFixed then
 					existing.timestamp = os.time()
 					existing.jobId = game.JobId
+					existing.name = player.Name
+					existing.displayName = player.DisplayName or player.Name
 					httpRequest({ Url = FIREBASE_LIVE .. "/" .. tostring(player.UserId) .. ".json", Method = "PUT", Headers = { ["Content-Type"] = "application/json" }, Body = HttpService:JSONEncode(existing) })
 					return
 				end
@@ -344,8 +329,6 @@ function scanOnlineUsers()
 					playerName = tostring(live.name or "?"),
 					displayName = tostring(live.displayName or live.name or "?"),
 					userId = live.userId,
-					carName = tostring(live.carName or "-"),
-					description = tostring(live.description or ""),
 					config = cfg,
 					timestamp = ts,
 					age = age,
@@ -384,7 +367,7 @@ function scanFixedUsers()
 						playerName = tostring(live.name or "?"),
 						displayName = tostring(live.displayName or live.name or "?"),
 						userId = live.userId,
-						carName = tostring(live.carName or cfg.carDisplayName or "-"),
+						carName = tostring(live.carName or "-"),
 						description = tostring(live.description or ""),
 						config = cfg,
 						timestamp = ts,
@@ -631,7 +614,7 @@ local titleLabel = Instance.new("TextLabel")
 titleLabel.BackgroundTransparency = 1
 titleLabel.Size = UDim2.new(1, -40, 1, 0)
 titleLabel.Position = UDim2.new(0, 12, 0, 0)
-titleLabel.Text = "Drift X v4.3"
+titleLabel.Text = "Drift X v5.0"
 titleLabel.Font = Enum.Font.GothamBold
 titleLabel.TextSize = 14
 titleLabel.TextColor3 = C.title
@@ -977,14 +960,7 @@ function makeValueInput(parent, label, default, order, decimals)
 	}
 end
 
-local secNome = createSection(pageCarro, "Nome do carro (online)", 0)
-local carNameBox = makeInput(secNome, "Nome exibido", "", 1)
-carNameBox.PlaceholderText = "Nome que aparece na aba Jogadores"
-carNameBox.FocusLost:Connect(function()
-	onlineCarName = carNameBox.Text:gsub("^%s+", ""):gsub("%s+$", "")
-	publishOnline()
-end)
-
+-- ABA CARRO (sem campo de nome)
 local secDrift = createSection(pageCarro, "Drift", 1)
 local frictionCtrl = makeSliderWithInput(secDrift, "Friction", 0.01, 10, 0.30, 1, 2)
 local weightCtrl   = makeSliderWithInput(secDrift, "Weight", 0.10, 50, 1.00, 2, 2)
@@ -1021,6 +997,7 @@ makeButton(secMotor, "Inserir Config Motor", 3, function()
 	publishOnline()
 	print("Motor configurado")
 end)
+
 local secSteer = createSection(pageCarro, "Direcao", 3)
 local angleCtrl = makeValueInput(secSteer, "Max Angle", 0.40, 1, 2)
 local speedCtrl = makeSliderWithInput(secSteer, "Speed", 0.05, 3.00, 0.50, 2, 2)
@@ -1061,7 +1038,7 @@ makeButton(secSteer, "Inserir Config Completa", 4, function()
 	publishOnline()
 	print("Config completa inserida")
 end)
-
+-- ABA HUD
 local secHud = createSection(pageHud, "Setas Mobile", 1)
 local arrowsOn = true
 local arrowsBtn = makeButton(secHud, "Mostrar Setas: ON", 1, function()
@@ -1082,6 +1059,7 @@ makeButton(secHud, "Aplicar HUD", 4, function()
 	applyHudSettings()
 end)
 
+-- ABA PAINEL
 local secUISize = createSection(pagePainel, "Tamanho da Interface", 1)
 local uiScaleLabel = Instance.new("TextLabel")
 uiScaleLabel.BackgroundTransparency = 1
@@ -1229,6 +1207,7 @@ for i, theme in ipairs(THEMES) do
 	table.insert(themeSwatches, sw)
 	sw.MouseButton1Click:Connect(function() applyTheme(theme) end)
 end
+
 function addLiveCounter(lbl, expiresAt)
 	table.insert(liveCounters, { label = lbl, expiresAt = expiresAt })
 end
@@ -1253,12 +1232,12 @@ task.spawn(function()
 		end
 	end
 end)
-
+-- ABA PUBLICAR
 local secHowTo = createSection(pagePublicar, "Como Funciona", 1)
 local howToLbl = Instance.new("TextLabel")
 howToLbl.BackgroundTransparency = 1
 howToLbl.Size = UDim2.new(1, 0, 0, 76)
-howToLbl.Text = "- Aqui voce escolhe o NOME que vai ficar salvo (diferente da aba Carro)\n- Esse nome fica 30 dias na aba Config\n- Outros jogadores veem e copiam sua config\n- So apaga quando voce clicar em Remover ou expirar"
+howToLbl.Text = "- Aqui voce escolhe o NOME que vai ficar salvo\n- Esse nome fica 30 dias na aba Config\n- Outros jogadores veem e copiam sua config\n- Seu nick (@usuario) sempre aparece junto\n- So apaga quando voce clicar em Remover ou expirar"
 howToLbl.TextWrapped = true
 howToLbl.Font = Enum.Font.Gotham
 howToLbl.TextSize = 11
@@ -1348,7 +1327,7 @@ padDesc.Parent = descBox
 local publishBtn = makeButton(secForm, "Publicar Agora (30 dias)", 3, function()
 	local nomeDigitado = pubNameBox.Text:gsub("^%s+", ""):gsub("%s+$", "")
 	if nomeDigitado == "" then
-		nomeDigitado = getOnlineName()
+		nomeDigitado = "Config de " .. player.Name
 		pubNameBox.Text = nomeDigitado
 	end
 	publishCarName = nomeDigitado
@@ -1393,6 +1372,7 @@ function clearMyFixed()
 		if child:IsA("Frame") then child:Destroy() end
 	end
 end
+
 refreshPublishList = function()
 	clearMyFixed()
 	myFixedStatus.Text = "Buscando..."
@@ -1499,7 +1479,7 @@ refreshPublishList = function()
 		end)
 	end)
 end
-
+-- ABA CONFIG
 local secSearch = createSection(pageConfig, "Pesquisar", 1)
 local searchRow = Instance.new("Frame")
 searchRow.Size = UDim2.new(1, 0, 0, 32)
@@ -1596,6 +1576,7 @@ refreshBtn.TextColor3 = C.text
 refreshBtn.Parent = actionRow
 uiCorner(refreshBtn, 6)
 table.insert(themedButtons, refreshBtn)
+
 local configListSection = createSection(pageConfig, "Publicacoes Fixadas (30 dias)", 2)
 local configListFrame = Instance.new("Frame")
 configListFrame.Size = UDim2.new(1, 0, 0, 0)
@@ -1851,6 +1832,7 @@ end)
 refreshBtn.MouseButton1Click:Connect(function()
 	refreshConfigList()
 end)
+-- ABA JOGADORES
 local secOnline = createSection(pageJogadores, "Jogadores Online Agora", 1)
 
 local onlineStatus = Instance.new("TextLabel")
@@ -1922,7 +1904,7 @@ local function renderPlayersList(list, err)
 		if entry.isSelf then tag = "  (voce)"
 		elseif entry.sameServer then tag = "  (mesmo servidor)"
 		else tag = "  (outro servidor)" end
-		nameLbl.Text = entry.playerName .. tag
+		nameLbl.Text = entry.displayName .. "  @" .. entry.playerName .. tag
 		nameLbl.Font = Enum.Font.GothamBold
 		nameLbl.TextSize = 11
 		nameLbl.TextColor3 = C.text
@@ -1930,22 +1912,10 @@ local function renderPlayersList(list, err)
 		nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
 		nameLbl.Parent = card
 
-		local carLbl = Instance.new("TextLabel")
-		carLbl.BackgroundTransparency = 1
-		carLbl.Size = UDim2.new(1, -110, 0, 16)
-		carLbl.Position = UDim2.new(0, 22, 0, 22)
-		carLbl.Text = entry.carName
-		carLbl.Font = Enum.Font.GothamBold
-		carLbl.TextSize = 11
-		carLbl.TextColor3 = Color3.fromRGB(220, 220, 220)
-		carLbl.TextXAlignment = Enum.TextXAlignment.Left
-		carLbl.TextTruncate = Enum.TextTruncate.AtEnd
-		carLbl.Parent = card
-
 		local cfgLbl = Instance.new("TextLabel")
 		cfgLbl.BackgroundTransparency = 1
 		cfgLbl.Size = UDim2.new(1, -110, 0, 14)
-		cfgLbl.Position = UDim2.new(0, 22, 0, 40)
+		cfgLbl.Position = UDim2.new(0, 22, 0, 26)
 		cfgLbl.Text = string.format("F:%.3g W:%.3g Vel:%.4g T:%.5g A:%.3g S:%.3g",
 			entry.config.friction or 0, entry.config.weight or 0,
 			entry.config.maxVel or 0, entry.config.maxTorque or 0,
@@ -1959,7 +1929,7 @@ local function renderPlayersList(list, err)
 		local timeLbl = Instance.new("TextLabel")
 		timeLbl.BackgroundTransparency = 1
 		timeLbl.Size = UDim2.new(1, -110, 0, 14)
-		timeLbl.Position = UDim2.new(0, 22, 0, 56)
+		timeLbl.Position = UDim2.new(0, 22, 0, 46)
 		timeLbl.Text = "Visto ha " .. formatAgo(entry.age)
 		timeLbl.Font = Enum.Font.Gotham
 		timeLbl.TextSize = 9
@@ -2005,8 +1975,7 @@ local function renderPlayersList(list, err)
 			selectedRemoteConfig = entry.config
 			selectedConfigEntry = entry
 			local lines = {
-				entry.playerName .. "  (" .. entry.displayName .. ")",
-				"Carro: " .. entry.carName,
+				entry.displayName .. "  (@" .. entry.playerName .. ")",
 				"Visto ha " .. formatAgo(entry.age),
 				"----------",
 				string.format("Friction: %.4g", entry.config.friction or 0),
@@ -2071,7 +2040,7 @@ task.defer(function()
 		menu.Position = UDim2.new(0, (vp.X - w) / 2, 0, (vp.Y - h) / 2)
 	end
 end)
-
+-- MOBILE
 local isMobile = UserInputService.TouchEnabled
 
 function createMobileBtn(parent, text, right)
