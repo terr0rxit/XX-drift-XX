@@ -51,24 +51,39 @@ local customCarName = ""
 local FIREBASE_LIVE = "https://online-5f25a-default-rtdb.firebaseio.com/driftx/live"
 local ONLINE_TIMEOUT = 240 -- segundos sem update = offline
 
+local lastHttpError = ""
+local function hasHttpRequest()
+	return (syn and syn.request) or (http and http.request) or http_request or request
+end
+
 local function httpRequest(opts)
-	local req = (syn and syn.request) or (http and http.request) or http_request or request
+	local req = hasHttpRequest()
 	if not req then
-		return { StatusCode = 0, Body = "", Error = "sem request (ative HttpRequest no executor)" }
+		lastHttpError = "sem request — ative HttpRequest no executor"
+		return { StatusCode = 0, Body = "", Error = lastHttpError, Success = false }
 	end
 	local ok, r = pcall(req, opts)
 	if not ok then
-		return { StatusCode = 0, Body = "", Error = tostring(r) }
+		lastHttpError = tostring(r)
+		return { StatusCode = 0, Body = "", Error = lastHttpError, Success = false }
 	end
 	if type(r) ~= "table" then
-		return { StatusCode = 0, Body = "", Error = "resposta invalida" }
+		lastHttpError = "resposta invalida do request"
+		return { StatusCode = 0, Body = "", Error = lastHttpError, Success = false }
 	end
 	local code = r.StatusCode or r.Status or r.status_code or r.status or 0
 	local body = r.Body or r.body or ""
+	local success = r.Success == true or tonumber(code) == 200 or tonumber(code) == 201
+	if not success then
+		lastHttpError = "HTTP " .. tostring(code) .. " " .. tostring(body):sub(1, 80)
+	else
+		lastHttpError = ""
+	end
 	return {
 		StatusCode = tonumber(code) or 0,
 		Body = tostring(body),
-		Success = r.Success == true or tonumber(code) == 200 or tonumber(code) == 201
+		Success = success,
+		Error = lastHttpError,
 	}
 end
 
@@ -151,6 +166,9 @@ end
 --------------------------------------------------------------------
 -- Broadcast config (Firebase)
 --------------------------------------------------------------------
+local lastPublishOk = false
+local lastPublishMsg = "ainda não publicou"
+
 function publishConfig()
 	local car = currentCar or findPlayerCar()
 	local displayName = customCarName
@@ -165,20 +183,40 @@ function publishConfig()
 		name = player.Name,
 		userId = player.UserId,
 		carName = displayName,
-		config = sharedConfig,
+		config = {
+			friction = sharedConfig.friction,
+			weight = sharedConfig.weight,
+			maxVel = sharedConfig.maxVel,
+			maxTorque = sharedConfig.maxTorque,
+			maxAngle = sharedConfig.maxAngle,
+			steerSpeed = sharedConfig.steerSpeed,
+			driftOn = sharedConfig.driftOn,
+			motorOn = sharedConfig.motorOn,
+			steerOn = sharedConfig.steerOn,
+			autoAlign = sharedConfig.autoAlign,
+			carDisplayName = displayName,
+		},
 		jobId = game.JobId,
 		timestamp = os.time(),
 	}
 
 	task.spawn(function()
-		pcall(function()
-			httpRequest({
+		local ok, res = pcall(function()
+			return httpRequest({
 				Url = FIREBASE_LIVE .. "/" .. tostring(player.UserId) .. ".json",
 				Method = "PUT",
 				Headers = { ["Content-Type"] = "application/json" },
 				Body = HttpService:JSONEncode(data),
 			})
 		end)
+		if ok and res and res.Success then
+			lastPublishOk = true
+			lastPublishMsg = "online ✓ (" .. os.date("%H:%M:%S") .. ")"
+		else
+			lastPublishOk = false
+			lastPublishMsg = "falha: " .. (lastHttpError ~= "" and lastHttpError or "desconhecida")
+			warn("[DriftX Online] " .. lastPublishMsg)
+		end
 	end)
 end
 
@@ -194,47 +232,57 @@ function clearPublishedConfig()
 end
 
 function fetchLiveConfigs()
-	local ok, res = pcall(function()
-		local r = httpRequest({
-			Url = FIREBASE_LIVE .. ".json",
-			Method = "GET",
-			Headers = { ["Content-Type"] = "application/json" },
-		})
-		if not r or r.StatusCode ~= 200 then return {} end
-		local body = r.Body or ""
-		if body == "" or body == "null" then return {} end
-		local data = HttpService:JSONDecode(body)
-		if type(data) ~= "table" then return {} end
-		return data
-	end)
-	return (ok and type(res) == "table") and res or {}
+	if not hasHttpRequest() then
+		lastHttpError = "sem request — ative HttpRequest no executor"
+		return {}, lastHttpError
+	end
+	local r = httpRequest({
+		Url = FIREBASE_LIVE .. ".json",
+		Method = "GET",
+		Headers = { ["Content-Type"] = "application/json" },
+	})
+	if not r or not r.Success then
+		return {}, (r and r.Error) or lastHttpError or "GET falhou"
+	end
+	local body = r.Body or ""
+	if body == "" or body == "null" then return {}, nil end
+	local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+	if not ok or type(data) ~= "table" then
+		return {}, "JSON inválido"
+	end
+	return data, nil
 end
 
 function scanOnlineUsers()
 	local list = {}
-	local lives = fetchLiveConfigs()
+	local lives, err = fetchLiveConfigs()
 	local now = os.time()
 	local playersInServer = {}
 	for _, p in ipairs(Players:GetPlayers()) do
 		playersInServer[p.UserId] = p
+		playersInServer[tostring(p.UserId)] = p
+	end
+
+	if type(lives) ~= "table" then
+		return list, err or "sem dados"
 	end
 
 	for _, live in pairs(lives) do
 		if type(live) == "table" and live.userId then
 			local age = now - (tonumber(live.timestamp) or 0)
 			if age <= ONLINE_TIMEOUT then
-				-- só quem está no mesmo servidor
-				local p = playersInServer[live.userId]
-				if p or live.userId == player.UserId then
+				local uid = live.userId
+				local p = playersInServer[uid] or playersInServer[tostring(uid)] or playersInServer[tonumber(uid)]
+				if p or tonumber(uid) == player.UserId or tostring(uid) == tostring(player.UserId) then
 					local cfg = live.config
 					if type(cfg) ~= "table" then cfg = {} end
 					table.insert(list, {
 						playerName = tostring(live.name or (p and p.Name) or "?"),
-						userId = live.userId,
+						userId = uid,
 						carName = tostring(live.carName or cfg.carDisplayName or "—"),
 						config = cfg,
 						age = age,
-						isSelf = (live.userId == player.UserId),
+						isSelf = (tonumber(uid) == player.UserId),
 					})
 				end
 			end
@@ -245,7 +293,7 @@ function scanOnlineUsers()
 		if a.isSelf ~= b.isSelf then return a.isSelf end
 		return (a.playerName or "") < (b.playerName or "")
 	end)
-	return list
+	return list, err
 end
 
 --------------------------------------------------------------------
@@ -1278,16 +1326,22 @@ end
 
 refreshPlayersList = function()
 	clearPlayersList()
-	onlineStatus.Text = "Buscando no Firebase..."
+	local reqOk = hasHttpRequest() ~= nil
+	onlineStatus.Text = reqOk and ("Buscando... | " .. lastPublishMsg) or "⚠️ Ative HttpRequest no executor!"
 
 	task.spawn(function()
-		local list = scanOnlineUsers()
-		-- precisa atualizar UI na thread principal
+		publishConfig()
+		task.wait(0.4)
+		local list, err = scanOnlineUsers()
 		task.defer(function()
 			clearPlayersList()
-			onlineStatus.Text = (#list == 0)
-				and "Nenhum usuário Drift X online neste servidor"
-				or (tostring(#list) .. " usuário(s) online")
+			if err and #list == 0 then
+				onlineStatus.Text = "Erro: " .. tostring(err)
+			elseif #list == 0 then
+				onlineStatus.Text = "Nenhum Drift X online neste servidor | " .. lastPublishMsg
+			else
+				onlineStatus.Text = tostring(#list) .. " online | " .. lastPublishMsg
+			end
 
 			for i, entry in ipairs(list) do
 				local card = Instance.new("Frame")
@@ -1344,6 +1398,14 @@ end
 
 makeButton(secOnline, "Atualizar Lista", 3, function()
 	refreshPlayersList()
+end)
+makeButton(secOnline, "Publicar Minha Presença", 4, function()
+	publishConfig()
+	onlineStatus.Text = "Publicando... | " .. lastPublishMsg
+	task.delay(0.6, function()
+		onlineStatus.Text = lastPublishMsg
+		refreshPlayersList()
+	end)
 end)
 
 --------------------------------------------------------------------
