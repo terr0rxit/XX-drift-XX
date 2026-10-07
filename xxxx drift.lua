@@ -32,7 +32,10 @@ local mobileButtons, lockButtons = {}, {}
 local uiState = { scale = 0.75, locked = false }
 
 local publishCarName = ""
-local currentProfileView = nil
+local currentFilter = "todos"
+local currentOrder = "recentes"
+local thumbnailCache = {}
+local cachedFixed = {}
 
 local liveCounters = {}
 local detailLabel
@@ -79,7 +82,7 @@ end
 local function randomId(len)
 	local chars = "abcdefghijklmnopqrstuvwxyz0123456789"
 	local s = ""
-	for i = 1, (len or 8) do
+	for i = 1, (len or 6) do
 		local n = math.random(1, #chars)
 		s = s .. chars:sub(n, n)
 	end
@@ -129,8 +132,8 @@ function formatRemaining(sec)
 	local h = math.floor((sec % 86400) / 3600)
 	local m = math.floor((sec % 3600) / 60)
 	local s = sec % 60
-	if d > 0 then return string.format("%dd %dh %dmin %ds", d, h, m, s)
-	elseif h > 0 then return string.format("%dh %dmin %ds", h, m, s)
+	if d > 0 then return string.format("%dd %dh", d, h)
+	elseif h > 0 then return string.format("%dh %dmin", h, m)
 	elseif m > 0 then return string.format("%dmin %ds", m, s)
 	else return string.format("%ds", s) end
 end
@@ -171,9 +174,6 @@ end
 local lastPublishOk = false
 local lastPublishMsg = "ainda nao publicou"
 local isFixedPublished = false
-local publishedIds = {}
-local fixedData = nil
-local myLikes = {}
 
 local sliderRefs = { friction = nil, weight = nil, maxVel = nil, maxTorque = nil, maxAngle = nil, steerSpeed = nil }
 
@@ -218,45 +218,46 @@ function buildOnlineData()
 end
 
 function buildFixedData(desc)
-	local id = tostring(player.UserId) .. "_" .. randomId(8)
+	local id = tostring(player.UserId) .. "_" .. tostring(os.time()) .. "_" .. randomId(6)
 	return id, {
 		name = player.Name, displayName = player.DisplayName or player.Name,
 		userId = player.UserId, carName = publishCarName,
 		description = desc or "", isFixed = true, expiresAt = os.time() + FIXED_DURATION,
 		config = captureConfigSnapshot(),
 		jobId = game.JobId, serverPlace = game.PlaceId, timestamp = os.time(),
-		likes = 0, likeUserIds = {},
+		likes = 0,
 	}
 end
 
 function publishOnline()
 	task.spawn(function()
-		local r = httpRequest({ Url = FIREBASE_LIVE .. "/online_" .. tostring(player.UserId) .. ".json", Method = "GET", Headers = { ["Content-Type"] = "application/json" } })
-		-- só publica online temporário se não tiver NENHUMA publicação fixada ativa
+		local anyActive = false
 		if isFixedPublished then
-			local anyActive = false
-			for _, pid in ipairs(publishedIds) do
-				local pr = httpRequest({ Url = FIREBASE_LIVE .. "/" .. pid .. ".json", Method = "GET", Headers = { ["Content-Type"] = "application/json" } })
-				if pr and pr.Success and pr.Body and pr.Body ~= "null" then
-					local ok, data = pcall(function() return HttpService:JSONDecode(pr.Body) end)
-					if ok and type(data) == "table" and data.isFixed then
-						local exp = tonumber(data.expiresAt) or 0
-						if exp > os.time() then
-							anyActive = true
-							data.timestamp = os.time()
-							data.jobId = game.JobId
-							httpRequest({ Url = FIREBASE_LIVE .. "/" .. pid .. ".json", Method = "PUT", Headers = { ["Content-Type"] = "application/json" }, Body = HttpService:JSONEncode(data) })
+			local r = httpRequest({ Url = FIREBASE_LIVE .. ".json", Method = "GET", Headers = { ["Content-Type"] = "application/json" } })
+			if r and r.Success and r.Body and r.Body ~= "null" then
+				local ok, data = pcall(function() return HttpService:JSONDecode(r.Body) end)
+				if ok and type(data) == "table" then
+					for key, item in pairs(data) do
+						if type(item) == "table" and item.userId == player.UserId and item.isFixed == true then
+							local exp = tonumber(item.expiresAt) or 0
+							if exp > os.time() then
+								item.timestamp = os.time()
+								item.jobId = game.JobId
+								item.name = player.Name
+								item.displayName = player.DisplayName or player.Name
+								httpRequest({ Url = FIREBASE_LIVE .. "/" .. key .. ".json", Method = "PUT", Headers = { ["Content-Type"] = "application/json" }, Body = HttpService:JSONEncode(item) })
+								anyActive = true
+							end
 						end
 					end
 				end
 			end
-			if anyActive then
-				lastPublishOk = true
-				lastPublishMsg = "online mantendo publicacoes (" .. os.date("%H:%M:%S") .. ")"
-				return
-			end
 		end
-		-- publica temporário pra aparecer em Jogadores
+		if anyActive then
+			lastPublishOk = true
+			lastPublishMsg = "online (" .. os.date("%H:%M:%S") .. ")"
+			return
+		end
 		local data = buildOnlineData()
 		local ok, res = pcall(function()
 			return httpRequest({ Url = FIREBASE_LIVE .. "/online_" .. tostring(player.UserId) .. ".json", Method = "PUT", Headers = { ["Content-Type"] = "application/json" }, Body = HttpService:JSONEncode(data) })
@@ -281,30 +282,10 @@ function publishFixed(desc)
 			lastPublishOk = true
 			lastPublishMsg = "publicado (" .. os.date("%H:%M:%S") .. ")"
 			isFixedPublished = true
-			table.insert(publishedIds, id)
 		else
 			lastPublishOk = false
 			lastPublishMsg = "falha: " .. (lastHttpError ~= "" and lastHttpError or "desconhecida")
 			warn("[DriftX] " .. lastPublishMsg)
-		end
-	end)
-end
-function loadMyPublishedIds()
-	task.spawn(function()
-		local r = httpRequest({ Url = FIREBASE_LIVE .. ".json", Method = "GET", Headers = { ["Content-Type"] = "application/json" } })
-		if not r or not r.Success or not r.Body or r.Body == "null" then return end
-		local ok, data = pcall(function() return HttpService:JSONDecode(r.Body) end)
-		if not ok or type(data) ~= "table" then return end
-		publishedIds = {}
-		isFixedPublished = false
-		for key, item in pairs(data) do
-			if type(item) == "table" and item.userId == player.UserId and item.isFixed == true then
-				local exp = tonumber(item.expiresAt) or 0
-				if exp > os.time() then
-					table.insert(publishedIds, key)
-					isFixedPublished = true
-				end
-			end
 		end
 	end)
 end
@@ -335,17 +316,7 @@ function deletePublishedId(id)
 	task.spawn(function()
 		httpRequest({ Url = FIREBASE_LIVE .. "/" .. id .. ".json", Method = "DELETE" })
 	end)
-	for i, pid in ipairs(publishedIds) do
-		if pid == id then
-			table.remove(publishedIds, i)
-			break
-		end
-	end
-	if #publishedIds == 0 then
-		isFixedPublished = false
-	end
 end
-
 function fetchLiveConfigs()
 	if not hasHttpRequest() then
 		lastHttpError = "sem request"
@@ -386,10 +357,19 @@ function toggleLike(postId, currentLikes)
 	end
 end
 
-function hasLiked(postId)
-	local myLikeKey = tostring(postId) .. "_" .. tostring(player.UserId)
-	local allLikes = fetchLikes()
-	return allLikes[myLikeKey] ~= nil
+function fetchAvatarUrl(userId)
+	if thumbnailCache[userId] then return thumbnailCache[userId] end
+	local url = "https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=" .. tostring(userId) .. "&size=150x150&format=Png&isCircular=true"
+	local r = httpRequest({ Url = url, Method = "GET" })
+	if r and r.Success and r.Body then
+		local ok, data = pcall(function() return HttpService:JSONDecode(r.Body) end)
+		if ok and data and data.data and data.data[1] and data.data[1].imageUrl then
+			thumbnailCache[userId] = data.data[1].imageUrl
+			return thumbnailCache[userId]
+		end
+	end
+	thumbnailCache[userId] = ""
+	return ""
 end
 
 function scanOnlineUsers()
@@ -461,43 +441,7 @@ function scanFixedUsers()
 			end
 		end
 	end
-	table.sort(list, function(a, b)
-		if a.isSelf ~= b.isSelf then return a.isSelf end
-		if a.isOnline ~= b.isOnline then return a.isOnline end
-		return (a.timestamp or 0) > (b.timestamp or 0)
-	end)
 	return list, err
-end
-
-function groupByAuthor(list)
-	local authors = {}
-	for _, entry in ipairs(list) do
-		local uid = entry.userId
-		if not authors[uid] then
-			authors[uid] = {
-				userId = uid,
-				playerName = entry.playerName,
-				displayName = entry.displayName,
-				isSelf = entry.isSelf,
-				isOnline = entry.isOnline,
-				totalLikes = 0,
-				posts = {},
-			}
-		end
-		authors[uid].totalLikes = authors[uid].totalLikes + (entry.likes or 0)
-		if entry.isOnline then authors[uid].isOnline = true end
-		table.insert(authors[uid].posts, entry)
-	end
-	local result = {}
-	for _, a in pairs(authors) do
-		table.sort(a.posts, function(x, y) return (x.timestamp or 0) > (y.timestamp or 0) end)
-		table.insert(result, a)
-	end
-	table.sort(result, function(a, b)
-		if a.isSelf ~= b.isSelf then return a.isSelf end
-		return a.totalLikes > b.totalLikes
-	end)
-	return result
 end
 function findPlayerCar()
 	if player.Character then
@@ -724,7 +668,7 @@ local titleLabel = Instance.new("TextLabel")
 titleLabel.BackgroundTransparency = 1
 titleLabel.Size = UDim2.new(1, -40, 1, 0)
 titleLabel.Position = UDim2.new(0, 12, 0, 0)
-titleLabel.Text = "Drift X v6.0"
+titleLabel.Text = "Drift X v6.3"
 titleLabel.Font = Enum.Font.GothamBold
 titleLabel.TextSize = 14
 titleLabel.TextColor3 = C.title
@@ -760,7 +704,6 @@ local tabs, pages = {}, {}
 local refreshPlayersList
 local refreshConfigList
 local refreshPublishList
-local showProfileView
 
 function createTab(name)
 	local btn = Instance.new("TextButton")
@@ -820,7 +763,6 @@ local pagePainel    = createTab("Painel")
 local pageJogadores = createTab("Jogadores")
 local pagePublicar  = createTab("Publicar")
 local pageConfig    = createTab("Config")
-local pagePerfil    = createTab("Perfil")
 
 tabs["Carro"].BackgroundColor3 = C.tabActive
 tabs["Carro"].TextColor3 = C.text
@@ -1348,8 +1290,8 @@ end)
 local secHowTo = createSection(pagePublicar, "Como Funciona", 1)
 local howToLbl = Instance.new("TextLabel")
 howToLbl.BackgroundTransparency = 1
-howToLbl.Size = UDim2.new(1, 0, 0, 90)
-howToLbl.Text = "- Cada clique em Publicar cria uma PUBLICACAO NOVA\n- Voce pode ter quantas quiser (sem limite)\n- Cada uma dura 30 dias e depois expira\n- Outros jogadores veem e podem curtir (coracao)\n- So voce pode remover as suas publicacoes"
+howToLbl.Size = UDim2.new(1, 0, 0, 80)
+howToLbl.Text = "- Cada clique em Publicar cria uma PUBLICACAO NOVA\n- Voce pode ter quantas quiser (sem limite)\n- Cada uma dura 30 dias\n- Todos veem na aba Config\n- Sua foto aparece junto"
 howToLbl.TextWrapped = true
 howToLbl.Font = Enum.Font.Gotham
 howToLbl.TextSize = 11
@@ -1454,7 +1396,7 @@ local publishBtn = makeButton(secForm, "Publicar Nova (30 dias)", 4, function()
 	end
 	publishCarName = nomeDigitado
 	publishFixed(descBox.Text)
-	task.wait(0.5)
+	task.wait(0.8)
 	task.defer(function()
 		if refreshPublishList then refreshPublishList() end
 		if refreshConfigList then refreshConfigList() end
@@ -1494,6 +1436,162 @@ function clearMyFixed()
 		if child:IsA("Frame") then child:Destroy() end
 	end
 end
+
+function makePostCard(parent, entry, opts)
+	opts = opts or {}
+	local card = Instance.new("Frame")
+	card.Size = UDim2.new(1, 0, 0, 120)
+	card.BackgroundColor3 = entry.isSelf and Color3.fromRGB(20, 40, 20) or C.inputBg
+	card.Parent = parent
+	uiCorner(card, 8)
+	local stroke = uiStroke(card, C.border, 1)
+	if entry.isSelf then stroke.Color = C.green
+	elseif entry.sameServer then stroke.Color = Color3.fromRGB(0, 130, 60) end
+
+	local avatarFrame = Instance.new("Frame")
+	avatarFrame.Size = UDim2.new(0, 50, 0, 50)
+	avatarFrame.Position = UDim2.new(0, 10, 0, 10)
+	avatarFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+	avatarFrame.BorderSizePixel = 0
+	avatarFrame.Parent = card
+	uiCorner(avatarFrame, 25)
+	uiStroke(avatarFrame, C.border, 1)
+
+	local avatarImg = Instance.new("ImageLabel")
+	avatarImg.Size = UDim2.new(1, -4, 1, -4)
+	avatarImg.Position = UDim2.new(0, 2, 0, 2)
+	avatarImg.BackgroundTransparency = 1
+	avatarImg.Parent = avatarFrame
+	uiCorner(avatarImg, 25)
+
+	task.spawn(function()
+		local url = fetchAvatarUrl(entry.userId)
+		if url and url ~= "" and avatarImg and avatarImg.Parent then
+			avatarImg.Image = url
+		end
+	end)
+
+	local nameLbl = Instance.new("TextLabel")
+	nameLbl.BackgroundTransparency = 1
+	nameLbl.Size = UDim2.new(1, -160, 0, 16)
+	nameLbl.Position = UDim2.new(0, 68, 0, 10)
+	nameLbl.Text = entry.displayName
+	nameLbl.Font = Enum.Font.GothamBold
+	nameLbl.TextSize = 12
+	nameLbl.TextColor3 = C.text
+	nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+	nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+	nameLbl.Parent = card
+
+	local userLbl = Instance.new("TextLabel")
+	userLbl.BackgroundTransparency = 1
+	userLbl.Size = UDim2.new(1, -160, 0, 14)
+	userLbl.Position = UDim2.new(0, 68, 0, 26)
+	userLbl.Text = "@" .. entry.playerName
+	userLbl.Font = Enum.Font.Gotham
+	userLbl.TextSize = 10
+	userLbl.TextColor3 = C.dim
+	userLbl.TextXAlignment = Enum.TextXAlignment.Left
+	userLbl.TextTruncate = Enum.TextTruncate.AtEnd
+	userLbl.Parent = card
+
+	local timeLbl = Instance.new("TextLabel")
+	timeLbl.BackgroundTransparency = 1
+	timeLbl.Size = UDim2.new(1, -160, 0, 14)
+	timeLbl.Position = UDim2.new(0, 68, 0, 42)
+	timeLbl.Text = formatDate(entry.timestamp) .. " - Expira em " .. formatRemaining(entry.remaining)
+	timeLbl.Font = Enum.Font.Gotham
+	timeLbl.TextSize = 9
+	timeLbl.TextColor3 = C.dim
+	timeLbl.TextXAlignment = Enum.TextXAlignment.Left
+	timeLbl.Parent = card
+
+	local carLbl = Instance.new("TextLabel")
+	carLbl.BackgroundTransparency = 1
+	carLbl.Size = UDim2.new(1, -20, 0, 16)
+	carLbl.Position = UDim2.new(0, 10, 0, 66)
+	carLbl.Text = "🚗 " .. entry.carName
+	carLbl.Font = Enum.Font.GothamBold
+	carLbl.TextSize = 11
+	carLbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+	carLbl.TextXAlignment = Enum.TextXAlignment.Left
+	carLbl.TextTruncate = Enum.TextTruncate.AtEnd
+	carLbl.Parent = card
+
+	if entry.description and entry.description ~= "" then
+		local descLbl = Instance.new("TextLabel")
+		descLbl.BackgroundTransparency = 1
+		descLbl.Size = UDim2.new(1, -20, 0, 14)
+		descLbl.Position = UDim2.new(0, 10, 0, 84)
+		descLbl.Text = entry.description
+		descLbl.Font = Enum.Font.Gotham
+		descLbl.TextSize = 10
+		descLbl.TextColor3 = C.dim
+		descLbl.TextXAlignment = Enum.TextXAlignment.Left
+		descLbl.TextTruncate = Enum.TextTruncate.AtEnd
+		descLbl.Parent = card
+	end
+
+	local likeBtn = Instance.new("TextButton")
+	likeBtn.Size = UDim2.new(0, 60, 0, 24)
+	likeBtn.Position = UDim2.new(1, -70, 0, 10)
+	likeBtn.BackgroundColor3 = C.apply
+	likeBtn.Text = "❤️ " .. (entry.likes or 0)
+	likeBtn.Font = Enum.Font.GothamBold
+	likeBtn.TextSize = 11
+	likeBtn.TextColor3 = C.pink
+	likeBtn.Parent = card
+	uiCorner(likeBtn, 6)
+	table.insert(themedButtons, likeBtn)
+
+	likeBtn.MouseButton1Click:Connect(function()
+		local newCount = toggleLike(entry.id, entry.likes or 0)
+		entry.likes = newCount
+		likeBtn.Text = "❤️ " .. newCount
+	end)
+
+	local copyBtn = Instance.new("TextButton")
+	copyBtn.Size = UDim2.new(0, 60, 0, 24)
+	copyBtn.Position = UDim2.new(1, -70, 0, 40)
+	copyBtn.BackgroundColor3 = C.green
+	copyBtn.Text = "Copiar"
+	copyBtn.Font = Enum.Font.GothamBold
+	copyBtn.TextSize = 10
+	copyBtn.TextColor3 = C.text
+	copyBtn.Parent = card
+	uiCorner(copyBtn, 6)
+
+	copyBtn.MouseButton1Click:Connect(function()
+		applyConfigFromRemote(entry.config)
+		if not currentCar then currentCar = findPlayerCar() end
+		if currentCar then
+			applyDrift("front", sharedConfig.friction, sharedConfig.weight)
+			applyDrift("rear", sharedConfig.friction, sharedConfig.weight)
+		end
+		copyBtn.Text = "OK!"
+		task.delay(1.5, function() copyBtn.Text = "Copiar" end)
+	end)
+
+	if opts.showDelete then
+		local delBtn = Instance.new("TextButton")
+		delBtn.Size = UDim2.new(0, 60, 0, 24)
+		delBtn.Position = UDim2.new(1, -70, 0, 70)
+		delBtn.BackgroundColor3 = Color3.fromRGB(120, 30, 30)
+		delBtn.Text = "Remover"
+		delBtn.Font = Enum.Font.GothamBold
+		delBtn.TextSize = 10
+		delBtn.TextColor3 = C.text
+		delBtn.Parent = card
+		uiCorner(delBtn, 6)
+		delBtn.MouseButton1Click:Connect(function()
+			deletePublishedId(entry.id)
+			task.wait(0.4)
+			if opts.onDelete then opts.onDelete() end
+		end)
+	end
+
+	return card
+end
 refreshPublishList = function()
 	clearMyFixed()
 	myFixedStatus.Text = "Buscando..."
@@ -1505,142 +1603,93 @@ refreshPublishList = function()
 			for _, e in ipairs(all) do
 				if e.isSelf then table.insert(mine, e) end
 			end
+			table.sort(mine, function(a, b) return (a.timestamp or 0) > (b.timestamp or 0) end)
 			pubCounterLbl.Text = "Voce tem " .. #mine .. " publicacoes ativas"
 			if #mine == 0 then
 				myFixedStatus.Text = "Voce nao tem publicacoes ativas"
 				return
 			end
 			myFixedStatus.Text = tostring(#mine) .. " publicacao(oes) ativa(s)"
-			for i, entry in ipairs(mine) do
-				local card = Instance.new("Frame")
-				card.Size = UDim2.new(1, 0, 0, 130)
-				card.BackgroundColor3 = Color3.fromRGB(20, 40, 20)
-				card.LayoutOrder = i
-				card.Parent = myFixedFrame
-				uiCorner(card, 6)
-				uiStroke(card, C.green, 1)
-
-				local nameLbl = Instance.new("TextLabel")
-				nameLbl.BackgroundTransparency = 1
-				nameLbl.Size = UDim2.new(1, -140, 0, 18)
-				nameLbl.Position = UDim2.new(0, 8, 0, 6)
-				nameLbl.Text = entry.carName
-				nameLbl.Font = Enum.Font.GothamBold
-				nameLbl.TextSize = 12
-				nameLbl.TextColor3 = C.text
-				nameLbl.TextXAlignment = Enum.TextXAlignment.Left
-				nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
-				nameLbl.Parent = card
-
-				local likeLbl = Instance.new("TextLabel")
-				likeLbl.BackgroundTransparency = 1
-				likeLbl.Size = UDim2.new(0, 120, 0, 18)
-				likeLbl.Position = UDim2.new(1, -128, 0, 6)
-				likeLbl.Text = "❤️ " .. (entry.likes or 0)
-				likeLbl.Font = Enum.Font.GothamBold
-				likeLbl.TextSize = 11
-				likeLbl.TextColor3 = C.pink
-				likeLbl.TextXAlignment = Enum.TextXAlignment.Right
-				likeLbl.Parent = card
-
-				local descLbl2 = Instance.new("TextLabel")
-				descLbl2.BackgroundTransparency = 1
-				descLbl2.Size = UDim2.new(1, -16, 0, 16)
-				descLbl2.Position = UDim2.new(0, 8, 0, 24)
-				descLbl2.Text = entry.description ~= "" and entry.description or "(sem descricao)"
-				descLbl2.Font = Enum.Font.Gotham
-				descLbl2.TextSize = 10
-				descLbl2.TextColor3 = C.dim
-				descLbl2.TextXAlignment = Enum.TextXAlignment.Left
-				descLbl2.TextTruncate = Enum.TextTruncate.AtEnd
-				descLbl2.Parent = card
-
-				local cfgLbl = Instance.new("TextLabel")
-				cfgLbl.BackgroundTransparency = 1
-				cfgLbl.Size = UDim2.new(1, -16, 0, 14)
-				cfgLbl.Position = UDim2.new(0, 8, 0, 42)
-				cfgLbl.Text = string.format("F:%.3g W:%.3g Vel:%.4g T:%.5g A:%.3g S:%.3g",
-					entry.config.friction or 0, entry.config.weight or 0,
-					entry.config.maxVel or 0, entry.config.maxTorque or 0,
-					entry.config.maxAngle or 0, entry.config.steerSpeed or 0)
-				cfgLbl.Font = Enum.Font.Gotham
-				cfgLbl.TextSize = 9
-				cfgLbl.TextColor3 = Color3.fromRGB(160, 200, 160)
-				cfgLbl.TextXAlignment = Enum.TextXAlignment.Left
-				cfgLbl.Parent = card
-
-				local remainLbl = Instance.new("TextLabel")
-				remainLbl.BackgroundTransparency = 1
-				remainLbl.Size = UDim2.new(1, -16, 0, 18)
-				remainLbl.Position = UDim2.new(0, 8, 0, 60)
-				remainLbl.Text = "Expira em: " .. formatRemaining(entry.remaining)
-				remainLbl.Font = Enum.Font.GothamBold
-				remainLbl.TextSize = 11
-				remainLbl.TextColor3 = C.yellow
-				remainLbl.TextXAlignment = Enum.TextXAlignment.Left
-				remainLbl.Parent = card
-				addLiveCounter(remainLbl, entry.expiresAt)
-
-				local delBtn = Instance.new("TextButton")
-				delBtn.Size = UDim2.new(0.48, 0, 0, 30)
-				delBtn.Position = UDim2.new(0.02, 0, 0, 90)
-				delBtn.BackgroundColor3 = Color3.fromRGB(120, 30, 30)
-				delBtn.Text = "Remover"
-				delBtn.Font = Enum.Font.GothamBold
-				delBtn.TextSize = 11
-				delBtn.TextColor3 = C.text
-				delBtn.Parent = card
-				uiCorner(delBtn, 6)
-
-				local copyBtn = Instance.new("TextButton")
-				copyBtn.Size = UDim2.new(0.48, 0, 0, 30)
-				copyBtn.Position = UDim2.new(0.5, 0, 0, 90)
-				copyBtn.BackgroundColor3 = C.green
-				copyBtn.Text = "Aplicar no Carro"
-				copyBtn.Font = Enum.Font.GothamBold
-				copyBtn.TextSize = 11
-				copyBtn.TextColor3 = C.text
-				copyBtn.Parent = card
-				uiCorner(copyBtn, 6)
-
-				delBtn.MouseButton1Click:Connect(function()
-					deletePublishedId(entry.id)
-					task.wait(0.4)
-					if refreshPublishList then refreshPublishList() end
-					if refreshConfigList then refreshConfigList() end
-				end)
-
-				copyBtn.MouseButton1Click:Connect(function()
-					applyConfigFromRemote(entry.config)
-					if not currentCar then currentCar = findPlayerCar() end
-					if currentCar then
-						applyDrift("front", sharedConfig.friction, sharedConfig.weight)
-						applyDrift("rear", sharedConfig.friction, sharedConfig.weight)
-					end
-					copyBtn.Text = "Aplicado!"
-					task.delay(1.5, function() copyBtn.Text = "Aplicar no Carro" end)
-				end)
+			for _, entry in ipairs(mine) do
+				local card = makePostCard(myFixedFrame, entry, {
+					showDelete = true,
+					onDelete = function()
+						if refreshPublishList then refreshPublishList() end
+						if refreshConfigList then refreshConfigList() end
+					end,
+				})
+				card.Size = UDim2.new(1, 0, 0, 120)
 			end
 		end)
 	end)
 end
 
 -- ABA CONFIG
-local secSearch = createSection(pageConfig, "Pesquisar Autores", 1)
+local secConfigHeader = createSection(pageConfig, "Configuracoes Publicadas", 1)
+
+local filterRow1 = Instance.new("Frame")
+filterRow1.Size = UDim2.new(1, 0, 0, 28)
+filterRow1.BackgroundTransparency = 1
+filterRow1.LayoutOrder = 1
+filterRow1.Parent = secConfigHeader
+
+local function makeFilterBtn(parent, text, x, width)
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.new(width or 0.32, 0, 1, 0)
+	b.Position = UDim2.new(x, 0, 0, 0)
+	b.BackgroundColor3 = C.apply
+	b.Text = text
+	b.Font = Enum.Font.GothamBold
+	b.TextSize = 10
+	b.TextColor3 = C.text
+	b.Parent = parent
+	uiCorner(b, 6)
+	table.insert(themedButtons, b)
+	return b
+end
+
+local btnTodos   = makeFilterBtn(filterRow1, "Todos", 0)
+local btnServer  = makeFilterBtn(filterRow1, "Meu Servidor", 0.34)
+local btnMeus    = makeFilterBtn(filterRow1, "Meus", 0.68)
+
+local filterRow2 = Instance.new("Frame")
+filterRow2.Size = UDim2.new(1, 0, 0, 28)
+filterRow2.BackgroundTransparency = 1
+filterRow2.LayoutOrder = 2
+filterRow2.Parent = secConfigHeader
+
+local btnRecentes = makeFilterBtn(filterRow2, "Mais Recentes", 0, 0.48)
+local btnCurtidos = makeFilterBtn(filterRow2, "Mais Curtidos", 0.52, 0.48)
+
+local function updateFilterBtns()
+	btnTodos.BackgroundColor3 = (currentFilter == "todos") and C.tabActive or C.apply
+	btnServer.BackgroundColor3 = (currentFilter == "servidor") and C.tabActive or C.apply
+	btnMeus.BackgroundColor3 = (currentFilter == "meus") and C.tabActive or C.apply
+	btnRecentes.BackgroundColor3 = (currentOrder == "recentes") and C.tabActive or C.apply
+	btnCurtidos.BackgroundColor3 = (currentOrder == "curtidos") and C.tabActive or C.apply
+end
+
+btnTodos.MouseButton1Click:Connect(function() currentFilter = "todos"; updateFilterBtns(); refreshConfigList() end)
+btnServer.MouseButton1Click:Connect(function() currentFilter = "servidor"; updateFilterBtns(); refreshConfigList() end)
+btnMeus.MouseButton1Click:Connect(function() currentFilter = "meus"; updateFilterBtns(); refreshConfigList() end)
+btnRecentes.MouseButton1Click:Connect(function() currentOrder = "recentes"; updateFilterBtns(); refreshConfigList() end)
+btnCurtidos.MouseButton1Click:Connect(function() currentOrder = "curtidos"; updateFilterBtns(); refreshConfigList() end)
+updateFilterBtns()
+
 local searchRow = Instance.new("Frame")
-searchRow.Size = UDim2.new(1, 0, 0, 32)
+searchRow.Size = UDim2.new(1, 0, 0, 30)
 searchRow.BackgroundTransparency = 1
-searchRow.LayoutOrder = 1
-searchRow.Parent = secSearch
+searchRow.LayoutOrder = 3
+searchRow.Parent = secConfigHeader
 
 local searchBox = Instance.new("TextBox")
 searchBox.Size = UDim2.new(1, 0, 1, 0)
 searchBox.BackgroundColor3 = C.inputBg
-searchBox.PlaceholderText = "Digite nick do autor..."
+searchBox.PlaceholderText = "Pesquisar por nick ou nome do carro..."
 searchBox.PlaceholderColor3 = Color3.fromRGB(100, 100, 100)
 searchBox.Text = ""
 searchBox.Font = Enum.Font.GothamMedium
-searchBox.TextSize = 12
+searchBox.TextSize = 11
 searchBox.TextColor3 = C.text
 searchBox.ClearTextOnFocus = false
 searchBox.TextXAlignment = Enum.TextXAlignment.Left
@@ -1655,32 +1704,19 @@ padSearch.Parent = searchBox
 local configStatus = Instance.new("TextLabel")
 configStatus.BackgroundTransparency = 1
 configStatus.Size = UDim2.new(1, 0, 0, 18)
-configStatus.Text = "Clique em Atualizar para carregar"
+configStatus.Text = "Carregando..."
 configStatus.Font = Enum.Font.Gotham
 configStatus.TextSize = 11
 configStatus.TextColor3 = C.dim
 configStatus.TextXAlignment = Enum.TextXAlignment.Left
-configStatus.LayoutOrder = 2
-configStatus.Parent = secSearch
+configStatus.LayoutOrder = 4
+configStatus.Parent = secConfigHeader
 
-local actionRow = Instance.new("Frame")
-actionRow.Size = UDim2.new(1, 0, 0, 28)
-actionRow.BackgroundTransparency = 1
-actionRow.LayoutOrder = 3
-actionRow.Parent = secSearch
+local refreshBtn = makeButton(secConfigHeader, "Atualizar Lista", 5, function()
+	refreshConfigList()
+end)
 
-local refreshBtn = Instance.new("TextButton")
-refreshBtn.Size = UDim2.new(1, 0, 1, 0)
-refreshBtn.BackgroundColor3 = C.apply
-refreshBtn.Text = "Atualizar Lista"
-refreshBtn.Font = Enum.Font.GothamBold
-refreshBtn.TextSize = 11
-refreshBtn.TextColor3 = C.text
-refreshBtn.Parent = actionRow
-uiCorner(refreshBtn, 6)
-table.insert(themedButtons, refreshBtn)
-
-local configListSection = createSection(pageConfig, "Autores (clique para ver configs)", 2)
+local configListSection = createSection(pageConfig, "Publicacoes", 2)
 local configListFrame = Instance.new("Frame")
 configListFrame.Size = UDim2.new(1, 0, 0, 0)
 configListFrame.AutomaticSize = Enum.AutomaticSize.Y
@@ -1693,45 +1729,43 @@ configListLayout.SortOrder = Enum.SortOrder.LayoutOrder
 configListLayout.Padding = UDim.new(0, 8)
 configListLayout.Parent = configListFrame
 
-local detailSection = createSection(pageConfig, "Detalhes", 3)
-detailLabel = Instance.new("TextLabel")
-detailLabel.BackgroundTransparency = 1
-detailLabel.Size = UDim2.new(1, 0, 0, 160)
-detailLabel.Text = "Clique num autor para ver as configs dele"
-detailLabel.Font = Enum.Font.Gotham
-detailLabel.TextSize = 11
-detailLabel.TextColor3 = C.dim
-detailLabel.TextWrapped = true
-detailLabel.TextYAlignment = Enum.TextYAlignment.Top
-detailLabel.TextXAlignment = Enum.TextXAlignment.Left
-detailLabel.LayoutOrder = 1
-detailLabel.Parent = detailSection
-
 function clearConfigList()
 	for _, child in ipairs(configListFrame:GetChildren()) do
 		if child:IsA("Frame") then child:Destroy() end
 	end
 end
 
-local cachedFixed = {}
 function renderConfigList()
 	clearConfigList()
 	local query = string.lower(searchBox.Text or "")
 	local filtered = {}
 	for _, entry in ipairs(cachedFixed) do
-		if query == "" then
-			table.insert(filtered, entry)
-		else
+		local ok = true
+		if currentFilter == "servidor" then ok = entry.sameServer
+		elseif currentFilter == "meus" then ok = entry.isSelf end
+		if ok and query ~= "" then
 			local nameMatch = string.find(string.lower(entry.playerName), query, 1, true) ~= nil
-			local displayMatch = string.find(string.lower(entry.displayName or ""), query, 1, true) ~= nil
-			if nameMatch or displayMatch then table.insert(filtered, entry) end
+			local dispMatch = string.find(string.lower(entry.displayName or ""), query, 1, true) ~= nil
+			local carMatch = string.find(string.lower(entry.carName), query, 1, true) ~= nil
+			local descMatch = string.find(string.lower(entry.description or ""), query, 1, true) ~= nil
+			ok = nameMatch or dispMatch or carMatch or descMatch
 		end
+		if ok then table.insert(filtered, entry) end
 	end
 
-	local authors = groupByAuthor(filtered)
-	configStatus.Text = string.format("%d autores - %d publicacoes", #authors, #filtered)
+	if currentOrder == "curtidos" then
+		table.sort(filtered, function(a, b)
+			if (a.likes or 0) ~= (b.likes or 0) then return (a.likes or 0) > (b.likes or 0) end
+			return (a.timestamp or 0) > (b.timestamp or 0)
+		end)
+	else
+		table.sort(filtered, function(a, b)
+			return (a.timestamp or 0) > (b.timestamp or 0)
+		end)
+	end
 
-	if #authors == 0 then
+	configStatus.Text = tostring(#filtered) .. " publicacao(oes)"
+	if #filtered == 0 then
 		local emptyLbl = Instance.new("TextLabel")
 		emptyLbl.Size = UDim2.new(1, 0, 0, 40)
 		emptyLbl.BackgroundTransparency = 1
@@ -1743,79 +1777,8 @@ function renderConfigList()
 		return
 	end
 
-	for i, author in ipairs(authors) do
-		local card = Instance.new("Frame")
-		card.Size = UDim2.new(1, 0, 0, 70)
-		card.BackgroundColor3 = author.isSelf and Color3.fromRGB(20, 40, 20) or C.inputBg
-		card.LayoutOrder = i
-		card.Parent = configListFrame
-		uiCorner(card, 6)
-		local stroke = uiStroke(card, C.border, 1)
-		if author.isSelf then stroke.Color = C.green
-		elseif author.isOnline then stroke.Color = Color3.fromRGB(0, 130, 60) end
-
-		local dot = Instance.new("Frame")
-		dot.Size = UDim2.new(0, 8, 0, 8)
-		dot.Position = UDim2.new(0, 8, 0, 10)
-		dot.BackgroundColor3 = author.isOnline and Color3.fromRGB(0, 200, 80) or Color3.fromRGB(90, 90, 90)
-		dot.BorderSizePixel = 0
-		dot.Parent = card
-		uiCorner(dot, 4)
-
-		local nameLbl = Instance.new("TextLabel")
-		nameLbl.BackgroundTransparency = 1
-		nameLbl.Size = UDim2.new(1, -110, 0, 18)
-		nameLbl.Position = UDim2.new(0, 22, 0, 8)
-		local tag = ""
-		if author.isSelf then tag = "  (voce)"
-		elseif author.isOnline then tag = "  online" end
-		nameLbl.Text = author.displayName .. "  @" .. author.playerName .. tag
-		nameLbl.Font = Enum.Font.GothamBold
-		nameLbl.TextSize = 12
-		nameLbl.TextColor3 = C.text
-		nameLbl.TextXAlignment = Enum.TextXAlignment.Left
-		nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
-		nameLbl.Parent = card
-
-		local infoLbl = Instance.new("TextLabel")
-		infoLbl.BackgroundTransparency = 1
-		infoLbl.Size = UDim2.new(1, -110, 0, 16)
-		infoLbl.Position = UDim2.new(0, 22, 0, 28)
-		infoLbl.Text = tostring(#author.posts) .. " publicacao(oes)"
-		infoLbl.Font = Enum.Font.Gotham
-		infoLbl.TextSize = 10
-		infoLbl.TextColor3 = C.dim
-		infoLbl.TextXAlignment = Enum.TextXAlignment.Left
-		infoLbl.Parent = card
-
-		local likesLbl = Instance.new("TextLabel")
-		likesLbl.BackgroundTransparency = 1
-		likesLbl.Size = UDim2.new(1, -110, 0, 16)
-		likesLbl.Position = UDim2.new(0, 22, 0, 44)
-		likesLbl.Text = "❤️ " .. author.totalLikes .. " curtidas no total"
-		likesLbl.Font = Enum.Font.Gotham
-		likesLbl.TextSize = 10
-		likesLbl.TextColor3 = C.pink
-		likesLbl.TextXAlignment = Enum.TextXAlignment.Left
-		likesLbl.Parent = card
-
-		local viewBtn = Instance.new("TextButton")
-		viewBtn.Size = UDim2.new(0, 70, 0, 40)
-		viewBtn.Position = UDim2.new(1, -78, 0.5, -20)
-		viewBtn.BackgroundColor3 = C.apply
-		viewBtn.Text = "Ver"
-		viewBtn.Font = Enum.Font.GothamBold
-		viewBtn.TextSize = 11
-		viewBtn.TextColor3 = C.text
-		viewBtn.Parent = card
-		uiCorner(viewBtn, 6)
-		table.insert(themedButtons, viewBtn)
-
-		viewBtn.MouseButton1Click:Connect(function()
-			if showProfileView then
-				showProfileView(author)
-			end
-		end)
+	for _, entry in ipairs(filtered) do
+		makePostCard(configListFrame, entry, {})
 	end
 end
 
@@ -1837,181 +1800,6 @@ end
 searchBox:GetPropertyChangedSignal("Text"):Connect(function()
 	renderConfigList()
 end)
-
-refreshBtn.MouseButton1Click:Connect(function()
-	refreshConfigList()
-end)
-
--- ABA PERFIL (abre quando clica num autor)
-local profileHeader = createSection(pagePerfil, "Autor", 1)
-local profileNameLbl = Instance.new("TextLabel")
-profileNameLbl.BackgroundTransparency = 1
-profileNameLbl.Size = UDim2.new(1, 0, 0, 24)
-profileNameLbl.Text = "Nenhum autor selecionado"
-profileNameLbl.Font = Enum.Font.GothamBold
-profileNameLbl.TextSize = 14
-profileNameLbl.TextColor3 = C.title
-profileNameLbl.TextXAlignment = Enum.TextXAlignment.Left
-profileNameLbl.LayoutOrder = 1
-profileNameLbl.Parent = profileHeader
-
-local profileInfoLbl = Instance.new("TextLabel")
-profileInfoLbl.BackgroundTransparency = 1
-profileInfoLbl.Size = UDim2.new(1, 0, 0, 18)
-profileInfoLbl.Text = ""
-profileInfoLbl.Font = Enum.Font.Gotham
-profileInfoLbl.TextSize = 11
-profileInfoLbl.TextColor3 = C.dim
-profileInfoLbl.TextXAlignment = Enum.TextXAlignment.Left
-profileInfoLbl.LayoutOrder = 2
-profileInfoLbl.Parent = profileHeader
-
-makeButton(profileHeader, "Voltar para Config", 3, function()
-	pages["Config"].Visible = true
-	pages["Perfil"].Visible = false
-	tabs["Config"].BackgroundColor3 = C.tabActive
-	tabs["Config"].TextColor3 = C.text
-	tabs["Perfil"].BackgroundColor3 = C.tabInactive
-	tabs["Perfil"].TextColor3 = C.dim
-end)
-
-local profileListSection = createSection(pagePerfil, "Publicacoes (mais recente primeiro)", 2)
-local profileListFrame = Instance.new("Frame")
-profileListFrame.Size = UDim2.new(1, 0, 0, 0)
-profileListFrame.AutomaticSize = Enum.AutomaticSize.Y
-profileListFrame.BackgroundTransparency = 1
-profileListFrame.LayoutOrder = 1
-profileListFrame.Parent = profileListSection
-
-local profileListLayout = Instance.new("UIListLayout")
-profileListLayout.SortOrder = Enum.SortOrder.LayoutOrder
-profileListLayout.Padding = UDim.new(0, 8)
-profileListLayout.Parent = profileListFrame
-
-function clearProfileList()
-	for _, child in ipairs(profileListFrame:GetChildren()) do
-		if child:IsA("Frame") then child:Destroy() end
-	end
-end
-
-showProfileView = function(author)
-	for n, b in pairs(tabs) do
-		b.BackgroundColor3 = (n == "Perfil") and C.tabActive or C.tabInactive
-		b.TextColor3 = (n == "Perfil") and C.text or C.dim
-		pages[n].Visible = (n == "Perfil")
-	end
-	profileNameLbl.Text = author.displayName .. "  @" .. author.playerName
-	profileInfoLbl.Text = tostring(#author.posts) .. " publicacoes - " .. author.totalLikes .. " curtidas no total"
-	clearProfileList()
-
-	for i, entry in ipairs(author.posts) do
-		local card = Instance.new("Frame")
-		card.Size = UDim2.new(1, 0, 0, 130)
-		card.BackgroundColor3 = C.inputBg
-		card.LayoutOrder = i
-		card.Parent = profileListFrame
-		uiCorner(card, 6)
-		uiStroke(card, C.border, 1)
-
-		local nameLbl = Instance.new("TextLabel")
-		nameLbl.BackgroundTransparency = 1
-		nameLbl.Size = UDim2.new(1, -80, 0, 18)
-		nameLbl.Position = UDim2.new(0, 8, 0, 6)
-		nameLbl.Text = "🚗 " .. entry.carName
-		nameLbl.Font = Enum.Font.GothamBold
-		nameLbl.TextSize = 12
-		nameLbl.TextColor3 = C.text
-		nameLbl.TextXAlignment = Enum.TextXAlignment.Left
-		nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
-		nameLbl.Parent = card
-
-		local descLbl = Instance.new("TextLabel")
-		descLbl.BackgroundTransparency = 1
-		descLbl.Size = UDim2.new(1, -16, 0, 16)
-		descLbl.Position = UDim2.new(0, 8, 0, 24)
-		descLbl.Text = entry.description ~= "" and entry.description or "(sem descricao)"
-		descLbl.Font = Enum.Font.Gotham
-		descLbl.TextSize = 10
-		descLbl.TextColor3 = C.dim
-		descLbl.TextXAlignment = Enum.TextXAlignment.Left
-		descLbl.TextTruncate = Enum.TextTruncate.AtEnd
-		descLbl.Parent = card
-
-		local cfgLbl = Instance.new("TextLabel")
-		cfgLbl.BackgroundTransparency = 1
-		cfgLbl.Size = UDim2.new(1, -16, 0, 14)
-		cfgLbl.Position = UDim2.new(0, 8, 0, 42)
-		cfgLbl.Text = string.format("F:%.3g W:%.3g Vel:%.4g T:%.5g A:%.3g S:%.3g",
-			entry.config.friction or 0, entry.config.weight or 0,
-			entry.config.maxVel or 0, entry.config.maxTorque or 0,
-			entry.config.maxAngle or 0, entry.config.steerSpeed or 0)
-		cfgLbl.Font = Enum.Font.Gotham
-		cfgLbl.TextSize = 9
-		cfgLbl.TextColor3 = Color3.fromRGB(160, 200, 160)
-		cfgLbl.TextXAlignment = Enum.TextXAlignment.Left
-		cfgLbl.Parent = card
-
-		local dateLbl = Instance.new("TextLabel")
-		dateLbl.BackgroundTransparency = 1
-		dateLbl.Size = UDim2.new(1, -16, 0, 14)
-		dateLbl.Position = UDim2.new(0, 8, 0, 58)
-		dateLbl.Text = formatDate(entry.timestamp) .. " - Expira em " .. formatRemaining(entry.remaining)
-		dateLbl.Font = Enum.Font.Gotham
-		dateLbl.TextSize = 9
-		dateLbl.TextColor3 = C.dim
-		dateLbl.TextXAlignment = Enum.TextXAlignment.Left
-		dateLbl.Parent = card
-
-		local likeBtn = Instance.new("TextButton")
-		likeBtn.Size = UDim2.new(0.3, 0, 0, 30)
-		likeBtn.Position = UDim2.new(0.02, 0, 0, 90)
-		likeBtn.BackgroundColor3 = C.apply
-		likeBtn.Text = "❤️ Curtir"
-		likeBtn.Font = Enum.Font.GothamBold
-		likeBtn.TextSize = 11
-		likeBtn.TextColor3 = C.pink
-		likeBtn.Parent = card
-		uiCorner(likeBtn, 6)
-
-		local likeCountLbl = Instance.new("TextLabel")
-		likeCountLbl.BackgroundTransparency = 1
-		likeCountLbl.Size = UDim2.new(0.3, 0, 0, 30)
-		likeCountLbl.Position = UDim2.new(0.34, 0, 0, 90)
-		likeCountLbl.Text = "❤️ " .. (entry.likes or 0)
-		likeCountLbl.Font = Enum.Font.GothamBold
-		likeCountLbl.TextSize = 12
-		likeCountLbl.TextColor3 = C.pink
-		likeCountLbl.Parent = card
-
-		local copyBtn = Instance.new("TextButton")
-		copyBtn.Size = UDim2.new(0.32, 0, 0, 30)
-		copyBtn.Position = UDim2.new(0.66, 0, 0, 90)
-		copyBtn.BackgroundColor3 = C.green
-		copyBtn.Text = "Copiar"
-		copyBtn.Font = Enum.Font.GothamBold
-		copyBtn.TextSize = 11
-		copyBtn.TextColor3 = C.text
-		copyBtn.Parent = card
-		uiCorner(copyBtn, 6)
-
-		likeBtn.MouseButton1Click:Connect(function()
-			local newCount = toggleLike(entry.id, entry.likes or 0)
-			entry.likes = newCount
-			likeCountLbl.Text = "❤️ " .. newCount
-		end)
-
-		copyBtn.MouseButton1Click:Connect(function()
-			applyConfigFromRemote(entry.config)
-			if not currentCar then currentCar = findPlayerCar() end
-			if currentCar then
-				applyDrift("front", sharedConfig.friction, sharedConfig.weight)
-				applyDrift("rear", sharedConfig.friction, sharedConfig.weight)
-			end
-			copyBtn.Text = "Aplicado!"
-			task.delay(1.5, function() copyBtn.Text = "Copiar" end)
-		end)
-	end
-end
 -- ABA JOGADORES
 local secOnline = createSection(pageJogadores, "Jogadores Online Agora", 1)
 
@@ -2046,6 +1834,117 @@ end
 
 local isRefreshingPlayers = false
 
+local function makeOnlineCard(entry)
+	local card = Instance.new("Frame")
+	card.Size = UDim2.new(1, 0, 0, 72)
+	card.BackgroundColor3 = entry.isSelf and Color3.fromRGB(20, 40, 20) or C.inputBg
+	card.Parent = playersListFrame
+	uiCorner(card, 8)
+	local cardStroke = uiStroke(card, entry.isSelf and C.green or C.border, 1)
+	if entry.sameServer and not entry.isSelf then
+		cardStroke.Color = Color3.fromRGB(0, 130, 60)
+	end
+
+	local avatarFrame = Instance.new("Frame")
+	avatarFrame.Size = UDim2.new(0, 50, 0, 50)
+	avatarFrame.Position = UDim2.new(0, 10, 0, 11)
+	avatarFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+	avatarFrame.BorderSizePixel = 0
+	avatarFrame.Parent = card
+	uiCorner(avatarFrame, 25)
+	uiStroke(avatarFrame, C.border, 1)
+
+	local avatarImg = Instance.new("ImageLabel")
+	avatarImg.Size = UDim2.new(1, -4, 1, -4)
+	avatarImg.Position = UDim2.new(0, 2, 0, 2)
+	avatarImg.BackgroundTransparency = 1
+	avatarImg.Parent = avatarFrame
+	uiCorner(avatarImg, 25)
+
+	task.spawn(function()
+		local url = fetchAvatarUrl(entry.userId)
+		if url and url ~= "" and avatarImg and avatarImg.Parent then
+			avatarImg.Image = url
+		end
+	end)
+
+	local dot = Instance.new("Frame")
+	dot.Size = UDim2.new(0, 10, 0, 10)
+	dot.Position = UDim2.new(0, 48, 0, 48)
+	dot.BackgroundColor3 = Color3.fromRGB(0, 220, 90)
+	dot.BorderSizePixel = 0
+	dot.ZIndex = 5
+	dot.Parent = avatarFrame
+	uiCorner(dot, 5)
+	uiStroke(dot, C.bg, 2)
+
+	local nameLbl = Instance.new("TextLabel")
+	nameLbl.BackgroundTransparency = 1
+	nameLbl.Size = UDim2.new(1, -140, 0, 16)
+	nameLbl.Position = UDim2.new(0, 68, 0, 10)
+	local tag = ""
+	if entry.isSelf then tag = "  (voce)"
+	elseif entry.sameServer then tag = "  (mesmo servidor)"
+	else tag = "  (outro servidor)" end
+	nameLbl.Text = entry.displayName .. tag
+	nameLbl.Font = Enum.Font.GothamBold
+	nameLbl.TextSize = 12
+	nameLbl.TextColor3 = C.text
+	nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+	nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+	nameLbl.Parent = card
+
+	local userLbl = Instance.new("TextLabel")
+	userLbl.BackgroundTransparency = 1
+	userLbl.Size = UDim2.new(1, -140, 0, 14)
+	userLbl.Position = UDim2.new(0, 68, 0, 26)
+	userLbl.Text = "@" .. entry.playerName .. " - " .. formatAgo(entry.age)
+	userLbl.Font = Enum.Font.Gotham
+	userLbl.TextSize = 10
+	userLbl.TextColor3 = C.dim
+	userLbl.TextXAlignment = Enum.TextXAlignment.Left
+	userLbl.TextTruncate = Enum.TextTruncate.AtEnd
+	userLbl.Parent = card
+
+	local cfgLbl = Instance.new("TextLabel")
+	cfgLbl.BackgroundTransparency = 1
+	cfgLbl.Size = UDim2.new(1, -140, 0, 14)
+	cfgLbl.Position = UDim2.new(0, 68, 0, 44)
+	cfgLbl.Text = string.format("F:%.3g W:%.3g V:%.4g T:%.5g A:%.3g S:%.3g",
+		entry.config.friction or 0, entry.config.weight or 0,
+		entry.config.maxVel or 0, entry.config.maxTorque or 0,
+		entry.config.maxAngle or 0, entry.config.steerSpeed or 0)
+	cfgLbl.Font = Enum.Font.Gotham
+	cfgLbl.TextSize = 9
+	cfgLbl.TextColor3 = Color3.fromRGB(160, 200, 160)
+	cfgLbl.TextXAlignment = Enum.TextXAlignment.Left
+	cfgLbl.Parent = card
+
+	local copyBtn = Instance.new("TextButton")
+	copyBtn.Size = UDim2.new(0, 60, 0, 50)
+	copyBtn.Position = UDim2.new(1, -70, 0.5, -25)
+	copyBtn.BackgroundColor3 = C.green
+	copyBtn.Text = "Copiar"
+	copyBtn.Font = Enum.Font.GothamBold
+	copyBtn.TextSize = 10
+	copyBtn.TextColor3 = C.text
+	copyBtn.Parent = card
+	uiCorner(copyBtn, 6)
+
+	copyBtn.MouseButton1Click:Connect(function()
+		applyConfigFromRemote(entry.config)
+		if not currentCar then currentCar = findPlayerCar() end
+		if currentCar then
+			applyDrift("front", sharedConfig.friction, sharedConfig.weight)
+			applyDrift("rear", sharedConfig.friction, sharedConfig.weight)
+		end
+		copyBtn.Text = "OK!"
+		task.delay(1.5, function() copyBtn.Text = "Copiar" end)
+	end)
+
+	return card
+end
+
 local function renderPlayersList(list, err)
 	clearPlayersList()
 	if err and #list == 0 then
@@ -2055,129 +1954,8 @@ local function renderPlayersList(list, err)
 	else
 		onlineStatus.Text = tostring(#list) .. " online - atualiza a cada " .. AUTO_REFRESH_INTERVAL .. "s"
 	end
-
-	for i, entry in ipairs(list) do
-		local card = Instance.new("Frame")
-		card.Size = UDim2.new(1, 0, 0, 90)
-		card.BackgroundColor3 = entry.isSelf and Color3.fromRGB(20, 40, 20) or C.inputBg
-		card.LayoutOrder = i
-		card.Parent = playersListFrame
-		uiCorner(card, 6)
-		local cardStroke = uiStroke(card, entry.isSelf and C.green or C.border, 1)
-		if entry.sameServer and not entry.isSelf then
-			cardStroke.Color = Color3.fromRGB(0, 130, 60)
-		end
-
-		local dot = Instance.new("Frame")
-		dot.Size = UDim2.new(0, 8, 0, 8)
-		dot.Position = UDim2.new(0, 8, 0, 10)
-		dot.BackgroundColor3 = Color3.fromRGB(0, 200, 80)
-		dot.BorderSizePixel = 0
-		dot.Parent = card
-		uiCorner(dot, 4)
-
-		local nameLbl = Instance.new("TextLabel")
-		nameLbl.BackgroundTransparency = 1
-		nameLbl.Size = UDim2.new(1, -100, 0, 18)
-		nameLbl.Position = UDim2.new(0, 22, 0, 4)
-		local tag = ""
-		if entry.isSelf then tag = "  (voce)"
-		elseif entry.sameServer then tag = "  (mesmo servidor)"
-		else tag = "  (outro servidor)" end
-		nameLbl.Text = entry.displayName .. "  @" .. entry.playerName .. tag
-		nameLbl.Font = Enum.Font.GothamBold
-		nameLbl.TextSize = 11
-		nameLbl.TextColor3 = C.text
-		nameLbl.TextXAlignment = Enum.TextXAlignment.Left
-		nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
-		nameLbl.Parent = card
-
-		local cfgLbl = Instance.new("TextLabel")
-		cfgLbl.BackgroundTransparency = 1
-		cfgLbl.Size = UDim2.new(1, -100, 0, 14)
-		cfgLbl.Position = UDim2.new(0, 22, 0, 26)
-		cfgLbl.Text = string.format("F:%.3g W:%.3g Vel:%.4g T:%.5g A:%.3g S:%.3g",
-			entry.config.friction or 0, entry.config.weight or 0,
-			entry.config.maxVel or 0, entry.config.maxTorque or 0,
-			entry.config.maxAngle or 0, entry.config.steerSpeed or 0)
-		cfgLbl.Font = Enum.Font.Gotham
-		cfgLbl.TextSize = 9
-		cfgLbl.TextColor3 = Color3.fromRGB(160, 200, 160)
-		cfgLbl.TextXAlignment = Enum.TextXAlignment.Left
-		cfgLbl.Parent = card
-
-		local timeLbl = Instance.new("TextLabel")
-		timeLbl.BackgroundTransparency = 1
-		timeLbl.Size = UDim2.new(1, -100, 0, 14)
-		timeLbl.Position = UDim2.new(0, 22, 0, 46)
-		timeLbl.Text = "Visto ha " .. formatAgo(entry.age)
-		timeLbl.Font = Enum.Font.Gotham
-		timeLbl.TextSize = 9
-		timeLbl.TextColor3 = C.dim
-		timeLbl.TextXAlignment = Enum.TextXAlignment.Left
-		timeLbl.Parent = card
-
-		local btnRow = Instance.new("Frame")
-		btnRow.Size = UDim2.new(0, 60, 0, 80)
-		btnRow.Position = UDim2.new(1, -66, 0.5, -40)
-		btnRow.BackgroundTransparency = 1
-		btnRow.Parent = card
-
-		local btnLayout = Instance.new("UIListLayout")
-		btnLayout.SortOrder = Enum.SortOrder.LayoutOrder
-		btnLayout.Padding = UDim.new(0, 4)
-		btnLayout.Parent = btnRow
-
-		local verBtn = Instance.new("TextButton")
-		verBtn.Size = UDim2.new(1, 0, 0, 36)
-		verBtn.BackgroundColor3 = C.apply
-		verBtn.Text = "Ver"
-		verBtn.Font = Enum.Font.GothamBold
-		verBtn.TextSize = 10
-		verBtn.TextColor3 = C.text
-		verBtn.LayoutOrder = 1
-		verBtn.Parent = btnRow
-		uiCorner(verBtn, 6)
-		table.insert(themedButtons, verBtn)
-
-		local copyBtn = Instance.new("TextButton")
-		copyBtn.Size = UDim2.new(1, 0, 0, 36)
-		copyBtn.BackgroundColor3 = C.green
-		copyBtn.Text = "Copiar"
-		copyBtn.Font = Enum.Font.GothamBold
-		copyBtn.TextSize = 10
-		copyBtn.TextColor3 = C.text
-		copyBtn.LayoutOrder = 2
-		copyBtn.Parent = btnRow
-		uiCorner(copyBtn, 6)
-
-		verBtn.MouseButton1Click:Connect(function()
-			selectedRemoteConfig = entry.config
-			selectedConfigEntry = entry
-			local lines = {
-				entry.displayName .. "  (@" .. entry.playerName .. ")",
-				"Visto ha " .. formatAgo(entry.age),
-				"----------",
-				string.format("Friction: %.4g", entry.config.friction or 0),
-				string.format("Weight: %.4g", entry.config.weight or 0),
-				string.format("Vel Motor: %.4g", entry.config.maxVel or 0),
-				string.format("Torque: %.4g", entry.config.maxTorque or 0),
-				string.format("Max Angle: %.4g", entry.config.maxAngle or 0),
-				string.format("Steer Speed: %.4g", entry.config.steerSpeed or 0),
-			}
-			if detailLabel then detailLabel.Text = table.concat(lines, "\n") end
-		end)
-
-		copyBtn.MouseButton1Click:Connect(function()
-			applyConfigFromRemote(entry.config)
-			if not currentCar then currentCar = findPlayerCar() end
-			if currentCar then
-				applyDrift("front", sharedConfig.friction, sharedConfig.weight)
-				applyDrift("rear", sharedConfig.friction, sharedConfig.weight)
-			end
-			copyBtn.Text = "Aplicado!"
-			task.delay(1.5, function() copyBtn.Text = "Copiar" end)
-		end)
+	for _, entry in ipairs(list) do
+		makeOnlineCard(entry)
 	end
 end
 
@@ -2198,7 +1976,6 @@ end
 makeButton(secOnline, "Atualizar Agora", 3, function()
 	refreshPlayersList()
 end)
-
 task.spawn(function()
 	task.wait(2)
 	while true do
@@ -2208,6 +1985,17 @@ task.spawn(function()
 		end
 	end
 end)
+
+task.spawn(function()
+	task.wait(10)
+	while true do
+		task.wait(30)
+		if pages["Config"] and pages["Config"].Visible then
+			refreshConfigList()
+		end
+	end
+end)
+
 -- MOBILE (setas)
 local isMobile = UserInputService.TouchEnabled
 
@@ -2339,7 +2127,6 @@ end, function()
 	motorState.currentDir = "Parar"
 	aplicarMotor("Parar")
 end)
-
 steerFrame = Instance.new("Frame")
 steerFrame.Name = "SteerHUD"
 steerFrame.Size = UDim2.new(0, 172, 0, 80)
@@ -2425,6 +2212,7 @@ toggleBtn.MouseButton1Click:Connect(function()
 		closeMenu()
 	end
 end)
+
 -- Teclado
 local conn1 = UserInputService.InputBegan:Connect(function(input, gp)
 	if gp or not isPlayerInCar(currentCar) then return end
@@ -2458,7 +2246,6 @@ local conn2 = UserInputService.InputEnded:Connect(function(input, gp)
 	end
 end)
 table.insert(connections, conn2)
-
 -- Loop principal
 local updateTick, wasInCar = 0, false
 local publishTick = 0
@@ -2562,55 +2349,207 @@ end)
 -- Inicialização
 task.spawn(function()
 	task.wait(0.5)
-	loadMyPublishedIds()
 	task.wait(1)
 	cleanExpiredMyPosts()
 	task.wait(1)
-	if not isFixedPublished then
-		publishOnline()
-	end
+	publishOnline()
 end)
--- Ajustes finais e cleanup de publicações expiradas periodicamente
-task.spawn(function()
-	while true do
-		task.wait(300) -- a cada 5 minutos
-		if isFixedPublished then
-			local all = scanFixedUsers()
-			local mineCount = 0
-			for _, e in ipairs(all) do
-				if e.isSelf then mineCount = mineCount + 1 end
-			end
-			if mineCount == 0 then
-				isFixedPublished = false
-				publishedIds = {}
-			end
+
+print("[DriftX v6.3] Carregado com sucesso!")
+print("[DriftX] Aba Config: lista corrida com filtros + busca")
+print("[DriftX] Clique em Ver/Copiar para aplicar configs dos outros")
+-- Função de perfil embutida na aba Config (clica e mostra as configs do autor)
+local perfilOverlay = Instance.new("Frame")
+perfilOverlay.Size = UDim2.new(1, -20, 0, 0)
+perfilOverlay.BackgroundColor3 = C.panel
+perfilOverlay.BorderSizePixel = 0
+perfilOverlay.Visible = false
+perfilOverlay.AutomaticSize = Enum.AutomaticSize.Y
+perfilOverlay.Parent = pageConfig
+uiCorner(perfilOverlay, 8)
+uiStroke(perfilOverlay, C.border, 1.5)
+
+local perfilOverlayPad = Instance.new("UIPadding")
+perfilOverlayPad.PaddingTop = UDim.new(0, 10)
+perfilOverlayPad.PaddingBottom = UDim.new(0, 10)
+perfilOverlayPad.PaddingLeft = UDim.new(0, 10)
+perfilOverlayPad.PaddingRight = UDim.new(0, 10)
+perfilOverlayPad.Parent = perfilOverlay
+
+local perfilOverlayList = Instance.new("UIListLayout")
+perfilOverlayList.SortOrder = Enum.SortOrder.LayoutOrder
+perfilOverlayList.Padding = UDim.new(0, 8)
+perfilOverlayList.Parent = perfilOverlay
+
+local perfilHeader = Instance.new("Frame")
+perfilHeader.Size = UDim2.new(1, 0, 0, 80)
+perfilHeader.BackgroundColor3 = C.inputBg
+perfilHeader.BorderSizePixel = 0
+perfilHeader.LayoutOrder = 0
+perfilHeader.Parent = perfilOverlay
+uiCorner(perfilHeader, 8)
+uiStroke(perfilHeader, C.border, 1)
+
+local perfilAvatarFrame = Instance.new("Frame")
+perfilAvatarFrame.Size = UDim2.new(0, 60, 0, 60)
+perfilAvatarFrame.Position = UDim2.new(0, 10, 0, 10)
+perfilAvatarFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+perfilAvatarFrame.BorderSizePixel = 0
+perfilAvatarFrame.Parent = perfilHeader
+uiCorner(perfilAvatarFrame, 30)
+uiStroke(perfilAvatarFrame, C.border, 1)
+
+local perfilAvatarImg = Instance.new("ImageLabel")
+perfilAvatarImg.Size = UDim2.new(1, -4, 1, -4)
+perfilAvatarImg.Position = UDim2.new(0, 2, 0, 2)
+perfilAvatarImg.BackgroundTransparency = 1
+perfilAvatarImg.Parent = perfilAvatarFrame
+uiCorner(perfilAvatarImg, 30)
+
+local perfilNameLbl = Instance.new("TextLabel")
+perfilNameLbl.BackgroundTransparency = 1
+perfilNameLbl.Size = UDim2.new(1, -90, 0, 18)
+perfilNameLbl.Position = UDim2.new(0, 80, 0, 12)
+perfilNameLbl.Text = "Autor"
+perfilNameLbl.Font = Enum.Font.GothamBold
+perfilNameLbl.TextSize = 14
+perfilNameLbl.TextColor3 = C.title
+perfilNameLbl.TextXAlignment = Enum.TextXAlignment.Left
+perfilNameLbl.Parent = perfilHeader
+
+local perfilUserLbl = Instance.new("TextLabel")
+perfilUserLbl.BackgroundTransparency = 1
+perfilUserLbl.Size = UDim2.new(1, -90, 0, 14)
+perfilUserLbl.Position = UDim2.new(0, 80, 0, 32)
+perfilUserLbl.Text = "@-"
+perfilUserLbl.Font = Enum.Font.Gotham
+perfilUserLbl.TextSize = 11
+perfilUserLbl.TextColor3 = C.dim
+perfilUserLbl.TextXAlignment = Enum.TextXAlignment.Left
+perfilUserLbl.Parent = perfilHeader
+
+local perfilStatsLbl = Instance.new("TextLabel")
+perfilStatsLbl.BackgroundTransparency = 1
+perfilStatsLbl.Size = UDim2.new(1, -90, 0, 14)
+perfilStatsLbl.Position = UDim2.new(0, 80, 0, 50)
+perfilStatsLbl.Text = "0 publicacoes - 0 curtidas"
+perfilStatsLbl.Font = Enum.Font.Gotham
+perfilStatsLbl.TextSize = 10
+perfilStatsLbl.TextColor3 = C.pink
+perfilStatsLbl.TextXAlignment = Enum.TextXAlignment.Left
+perfilStatsLbl.Parent = perfilHeader
+
+local perfilCloseBtn = Instance.new("TextButton")
+perfilCloseBtn.Size = UDim2.new(0, 70, 0, 26)
+perfilCloseBtn.Position = UDim2.new(1, -80, 0, 10)
+perfilCloseBtn.BackgroundColor3 = C.apply
+perfilCloseBtn.Text = "Fechar"
+perfilCloseBtn.Font = Enum.Font.GothamBold
+perfilCloseBtn.TextSize = 11
+perfilCloseBtn.TextColor3 = C.text
+perfilCloseBtn.Parent = perfilHeader
+uiCorner(perfilCloseBtn, 6)
+table.insert(themedButtons, perfilCloseBtn)
+
+perfilCloseBtn.MouseButton1Click:Connect(function()
+	perfilOverlay.Visible = false
+	configListFrame.Visible = true
+	secConfigHeader.Visible = true
+end)
+
+local perfilPostsFrame = Instance.new("Frame")
+perfilPostsFrame.Size = UDim2.new(1, 0, 0, 0)
+perfilPostsFrame.AutomaticSize = Enum.AutomaticSize.Y
+perfilPostsFrame.BackgroundTransparency = 1
+perfilPostsFrame.LayoutOrder = 1
+perfilPostsFrame.Parent = perfilOverlay
+
+local perfilPostsLayout = Instance.new("UIListLayout")
+perfilPostsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+perfilPostsLayout.Padding = UDim.new(0, 8)
+perfilPostsLayout.Parent = perfilPostsFrame
+
+function clearPerfilPosts()
+	for _, child in ipairs(perfilPostsFrame:GetChildren()) do
+		if child:IsA("Frame") then child:Destroy() end
+	end
+end
+
+function openPerfil(userId, displayName, username)
+	secConfigHeader.Visible = false
+	configListFrame.Visible = false
+	perfilOverlay.Visible = true
+	perfilNameLbl.Text = displayName or "?"
+	perfilUserLbl.Text = "@" .. (username or "?")
+	perfilAvatarImg.Image = ""
+	task.spawn(function()
+		local url = fetchAvatarUrl(userId)
+		if url and url ~= "" and perfilAvatarImg and perfilAvatarImg.Parent then
+			perfilAvatarImg.Image = url
 		end
+	end)
+	clearPerfilPosts()
+	perfilStatsLbl.Text = "Carregando..."
+	task.spawn(function()
+		local all = scanFixedUsers()
+		task.defer(function()
+			local mine = {}
+			local totalLikes = 0
+			for _, e in ipairs(all) do
+				if tonumber(e.userId) == tonumber(userId) then
+					table.insert(mine, e)
+					totalLikes = totalLikes + (e.likes or 0)
+				end
+			end
+			table.sort(mine, function(a, b) return (a.timestamp or 0) > (b.timestamp or 0) end)
+			perfilStatsLbl.Text = tostring(#mine) .. " publicacoes - " .. totalLikes .. " curtidas"
+			if #mine == 0 then
+				local lbl = Instance.new("TextLabel")
+				lbl.Size = UDim2.new(1, 0, 0, 40)
+				lbl.BackgroundTransparency = 1
+				lbl.Text = "Nenhuma publicacao"
+				lbl.Font = Enum.Font.Gotham
+				lbl.TextSize = 11
+				lbl.TextColor3 = C.dim
+				lbl.Parent = perfilPostsFrame
+				return
+			end
+			for _, entry in ipairs(mine) do
+				makePostCard(perfilPostsFrame, entry, {})
+			end
+		end)
+	end)
+end
+-- Adiciona botão "Perfil" em cada card da aba Config
+-- Reaplica o makePostCard com opção de abrir perfil (dentro da Config)
+
+local originalMakePostCard = makePostCard
+makePostCard = function(parent, entry, opts)
+	opts = opts or {}
+	local card = originalMakePostCard(parent, entry, opts)
+
+	-- Só adiciona botão Perfil na aba Config (não na aba Publicar)
+	if parent == configListFrame and not opts.showDelete then
+		local profileBtn = Instance.new("TextButton")
+		profileBtn.Size = UDim2.new(0, 60, 0, 24)
+		profileBtn.Position = UDim2.new(1, -70, 0, 70)
+		profileBtn.BackgroundColor3 = C.apply
+		profileBtn.Text = "Perfil"
+		profileBtn.Font = Enum.Font.GothamBold
+		profileBtn.TextSize = 10
+		profileBtn.TextColor3 = C.text
+		profileBtn.Parent = card
+		uiCorner(profileBtn, 6)
+		table.insert(themedButtons, profileBtn)
+		profileBtn.MouseButton1Click:Connect(function()
+			openPerfil(entry.userId, entry.displayName, entry.playerName)
+		end)
 	end
-end)
 
--- Publicar automático ao entrar no carro (mantém online na aba Jogadores)
-player.CharacterAdded:Connect(function()
-	task.wait(2)
-	if not isFixedPublished then
-		publishOnline()
-	end
-end)
+	return card
+end
 
-print("[DriftX] v6.0 carregado!")
-print("[DriftX] Abra o menu com o botao 'Drift X' no lado esquerdo da tela")
--- Comandos extras (opcional)
--- Se quiser adicionar algum atalho ou função extra depois, coloque aqui.
+-- Reaplica o searchBox para usar openPerfil também
+-- Fim do script
 
--- ✅ SCRIPT COMPLETO v6.0
--- Recursos:
--- - Aba Carro: Drift, Motor, Direcao
--- - Aba HUD: Setas mobile
--- - Aba Painel: Tamanho UI + temas
--- - Aba Jogadores: Quem ta online agora (auto-refresh 4s) + botao Copiar
--- - Aba Publicar: Criar quantas publicacoes quiser (sem limite), 30 dias cada
--- - Aba Config: Lista de autores agrupados - clique pra ver todas as configs dele
--- - Aba Perfil: Publicacoes do autor (mais recente primeiro) com coracao (curtida)
--- - Cada publicacao: pode curtir (1x por usuario) e copiar config
--- - Auto-limpeza de publicacoes expiradas
--- - Slots unicos com ID aleatorio (sem conflito entre usuarios)
--- - Firebase: drift-x-3edf5-default-rtdb.firebaseio.com
+print("[DriftX v6.3] Tudo carregado! Abra o menu e teste.")
